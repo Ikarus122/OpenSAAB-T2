@@ -6,7 +6,7 @@
 
 ## Intel ECM diagnostic preview · November 5, 2026
 
-0.2.29-ecm-preview.1 adopts the Android normal Full-session rule for existing
+0.2.29-ecm-preview.2 adopts the Android normal Full-session rule for existing
 Mac USB bindings (Nano, Chipsoft and MDI). An old limited-mode preference no
 longer changes Connect and start. Mac MX+ retains its existing limited binding;
 this scoped preview makes no new Bluetooth claim. Collection remains a separate

@@ -177,9 +177,11 @@ pub fn classify(raw: &str, last_tx: Option<&TxContext>) -> Value {
         let message = if rest.contains("profile=Seeds;") {
             "Security-data collection cannot submit an authorization key or perform module changes. OpenSAAB blocked this request before transport; this is a local policy refusal, not an ECU rejection.\n\nFinish collection through the original Security Access menu, then process the data and choose Resume in Full session. Do not retry Add automatically: earlier commands in a procedure may already have changed the vehicle."
         } else if rest.contains("controller=2 CAN_ID=241 service=AE profile=Read;") {
-            "The ignition-key test requires Full native control. This session was read-only, so OpenSAAB stopped before sending the request. The ECU did not reject it.\n\nChoose Connect and start, select Full native control, then retry Check Ignition Key Status. The previous session and its logs have been saved."
-        } else if rest.contains(" service=27 ") && rest.contains(" profile=Read;") {
-            "Security seed collection was requested in a read-diagnostics session. OpenSAAB stopped before sending that request; the ECU did not reject it.\n\nReconnect with Collect security seeds selected, then use the original Security Access menu. Seed collection does not process security data or submit an authorization key."
+            "The ignition-key test requires Full native control. This session was read-only, so OpenSAAB stopped before sending the request. The ECU did not reject it.\n\nConnect and start opens a Full session. Follow the original firmware prompts for Check Ignition Key Status. The previous session and its logs have been saved."
+        } else if (rest.contains(" service=27 ") || rest.contains("request=security_seed "))
+            && rest.contains(" profile=Read;")
+        {
+            "Security seed collection was requested in a read-diagnostics session. OpenSAAB stopped before sending that request; the ECU did not reject it.\n\nChoose Get security access to start collection, then use the original Security Access menu. Seed collection does not process security data or submit an authorization key."
         } else {
             "The original software requested a command outside this session's supported operations. OpenSAAB stopped before sending it; this is not an ECU rejection. See Console for the command and session profile."
         };
@@ -302,12 +304,12 @@ mod tests {
         assert!(v["message"]
             .as_str()
             .unwrap()
-            .contains("Collect security seeds"));
+            .contains("Get security access"));
         let already = classify(&seeds.replace("profile=Read", "profile=Seeds"), None);
         assert!(!already["message"]
             .as_str()
             .unwrap()
-            .contains("Collect security seeds"));
+            .contains("Get security access"));
         let ignition = "Chipsoft command guard blocked before USB: controller=2 CAN_ID=241 service=AE profile=Read; no ECU rejection";
         assert!(classify(ignition, None)["message"]
             .as_str()
