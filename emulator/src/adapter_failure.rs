@@ -4,6 +4,105 @@
 //! native link already received plus the last CAN transmission it submitted; nothing here
 //! talks to hardware, retries, or invents an ECU reply. An unknown error stays "adapter_stopped".
 use serde_json::{json, Value};
+pub mod progress;
+
+/// Fixed diagnostic labels only. Raw error text remains in the private local report.
+pub fn cause(raw: &str) -> &'static str {
+    if raw.contains("command guard blocked before")
+        || raw.contains("command rejected by collection profile")
+        || raw.contains("command/continuation gate rejected request")
+        || raw.contains("session gate rejected request")
+    {
+        "local_policy_refusal"
+    } else if disconnected(raw) {
+        "adapter_disconnected"
+    } else if raw.contains("checksum mismatch") {
+        "nano_checksum_mismatch"
+    } else if raw.contains("Nano")
+        && [
+            "delimiter",
+            "escape",
+            "Truncated Nano frame",
+            "framing error",
+        ]
+        .iter()
+        .any(|s| raw.contains(s))
+    {
+        "nano_framing_error"
+    } else if raw.contains("opcode ") && raw.contains(": status ") {
+        "nano_adapter_status"
+    } else if raw.contains("deadline") || raw.to_ascii_lowercase().contains("timed out") {
+        "transport_timeout"
+    } else if raw.contains("write failed or was short") || raw.contains("serial short write") {
+        "transport_write_failure"
+    } else {
+        "unclassified_adapter_error"
+    }
+}
+const CAUSES: &[&str] = &[
+    "local_policy_refusal",
+    "adapter_disconnected",
+    "nano_checksum_mismatch",
+    "nano_framing_error",
+    "nano_adapter_status",
+    "transport_timeout",
+    "transport_write_failure",
+    "unclassified_adapter_error",
+];
+
+fn nano_status(raw: &str) -> Option<Value> {
+    let (_, rest) = raw.split_once("opcode ")?;
+    let (op, rest) = rest.split_once(": status ")?;
+    let status = rest.get(..2)?;
+    if op.len() != 2
+        || !op
+            .bytes()
+            .chain(status.bytes())
+            .all(|b| b.is_ascii_hexdigit())
+        || rest
+            .as_bytes()
+            .get(2)
+            .is_some_and(|b| !b.is_ascii_whitespace())
+    {
+        return None;
+    }
+    Some(
+        json!({"opcode":u8::from_str_radix(op,16).ok()?,"status":u8::from_str_radix(status,16).ok()?}),
+    )
+}
+
+/// Fits the deployed report schema's existing message field. Whitelist every value;
+/// never copy raw adapter text, payloads or arbitrary local JSON into an upload.
+pub fn support_summary(failure: &Value) -> Option<String> {
+    let code = failure["cause"].as_str().filter(|s| CAUSES.contains(s))?;
+    let p = &failure["request_progress"];
+    let last = p["last_request"]
+        .as_str()
+        .filter(|s| progress::REQUESTS.contains(s))
+        .unwrap_or("unknown");
+    let count = |key: &str| {
+        p[key]
+            .as_u64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".into())
+    };
+    let nano = &failure["nano_status"];
+    let numeric = match (nano["opcode"].as_u64(), nano["status"].as_u64()) {
+        (Some(op @ 0..=255), Some(status @ 0..=255)) => {
+            format!("; adapter_opcode={op:02X}; adapter_status={status:02X}")
+        }
+        _ => String::new(),
+    };
+    Some(format!("cause={code}{numeric}; last_request_intent={last}; request_intents={}; requests_queued={}; potential_change_intents={}; security_key_intents={}; vehicle_state=unknown. Intents and queue acceptance do not prove transmission, ECU acceptance or persistence.",count("request_intents"),count("requests_queued"),count("potential_change_intents"),count("security_key_intents")))
+}
+
+pub fn policy_refusal(
+    controller: usize,
+    tx: &crate::candi_cpu::CanTransmission,
+    profile: crate::adapters::common::policy::Profile,
+) -> String {
+    format!("VCX Nano command guard blocked before transport: controller={controller} request={} profile={profile:?}; no ECU rejection",progress::request(&tx.frame))
+}
 
 /// The last frame the emulated CANdi handed to the adapter before the stop.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,13 +168,15 @@ fn disconnected(raw: &str) -> bool {
 pub fn classify(raw: &str, last_tx: Option<&TxContext>) -> Value {
     let raw_short: String = raw.chars().take(300).collect();
     let tx = last_tx.map(|t| json!({"controller":t.controller,"bus":t.bus,"wake":t.wake,"id":format!("{:03X}",t.id),"dlc":t.dlc}));
-    let out = |kind: &str, title: &str, message: String| json!({"schema":1,"kind":kind,"title":title,"message":message,"adapter_error":raw_short,"last_tx":tx,"ecu_rejected":false});
+    let out = |kind: &str, title: &str, message: String| json!({"schema":1,"kind":kind,"title":title,"message":message,"adapter_error":raw_short,"cause":cause(raw),"nano_status":nano_status(raw),"last_tx":tx,"ecu_rejected":false});
     if let Some(rest) = raw
         .split_once("command guard blocked before transport:")
         .or_else(|| raw.split_once("command guard blocked before USB:"))
         .map(|(_, rest)| rest)
     {
-        let message = if rest.contains("controller=2 CAN_ID=241 service=AE profile=Read;") {
+        let message = if rest.contains("profile=Seeds;") {
+            "Security-data collection cannot submit an authorization key or perform module changes. OpenSAAB blocked this request before transport; this is a local policy refusal, not an ECU rejection.\n\nFinish collection through the original Security Access menu, then process the data and choose Resume in Full session. Do not retry Add automatically: earlier commands in a procedure may already have changed the vehicle."
+        } else if rest.contains("controller=2 CAN_ID=241 service=AE profile=Read;") {
             "The ignition-key test requires Full native control. This session was read-only, so OpenSAAB stopped before sending the request. The ECU did not reject it.\n\nChoose Connect and start, select Full native control, then retry Check Ignition Key Status. The previous session and its logs have been saved."
         } else if rest.contains(" service=27 ") && rest.contains(" profile=Read;") {
             "Security seed collection was requested in a read-diagnostics session. OpenSAAB stopped before sending that request; the ECU did not reject it.\n\nReconnect with Collect security seeds selected, then use the original Security Access menu. Seed collection does not process security data or submit an authorization key."
@@ -106,13 +207,16 @@ pub fn classify(raw: &str, last_tx: Option<&TxContext>) -> Value {
         }
     }
     out("adapter_stopped", "Live adapter stopped",
-        "The adapter reported an error and the session stopped. The operation did not complete; no ECU reply was assumed. See Console for the adapter detail.".into())
+        format!("The adapter reported an error and the session stopped. Diagnostic cause: {}. The operation did not complete; no ECU reply was assumed. Earlier commands may already have changed the vehicle. Preserve the report before retrying an Add/Remove procedure. See Console for the adapter detail.",cause(raw)))
 }
 
 /// Prefer driver-correlated in-flight evidence when a backend supplies it.
 /// Existing drivers preserve their prior submitted-intent fallback.
-pub fn classify_with_backend(raw: &str, submitted: Option<&TxContext>,
-    active: Option<&crate::can_adapter::FailureContext>) -> Value {
+pub fn classify_with_backend(
+    raw: &str,
+    submitted: Option<&TxContext>,
+    active: Option<&crate::can_adapter::FailureContext>,
+) -> Value {
     let mut out = classify(raw, active.map(|c| &c.tx).or(submitted));
     if let Some(c) = active {
         out["in_flight"] = json!({"controller":c.tx.controller,"ticket":c.ticket,
@@ -217,10 +321,19 @@ mod tests {
         let ignition = "MDI command guard blocked before transport: controller=2 CAN_ID=241 service=AE profile=Read; no ECU rejection";
         let failure = classify(ignition, None);
         assert_eq!(failure["kind"], "command_blocked");
-        assert!(failure["message"].as_str().unwrap().contains("ignition-key test requires Full native control"));
+        assert!(failure["message"]
+            .as_str()
+            .unwrap()
+            .contains("ignition-key test requires Full native control"));
         assert_eq!(failure["ecu_rejected"], false);
-        assert_eq!(classify("MDI USB IN: IOKit 0xE00002C0", None)["kind"], "adapter_stopped");
-        assert_eq!(classify("MDI TCP device disconnected", None)["kind"], "adapter_disconnected");
+        assert_eq!(
+            classify("MDI USB IN: IOKit 0xE00002C0", None)["kind"],
+            "adapter_stopped"
+        );
+        assert_eq!(
+            classify("MDI TCP device disconnected", None)["kind"],
+            "adapter_disconnected"
+        );
     }
 
     #[test]
@@ -238,5 +351,54 @@ mod tests {
         assert_eq!(v["kind"], "adapter_stopped");
         assert_eq!(v["adapter_error"].as_str().unwrap().len(), 300);
         assert!(v["last_tx"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod incident_tests {
+    use super::*;
+    #[test]
+    fn nano_seed_guard_and_transport_faults_remain_distinct() {
+        let refusal="VCX Nano command guard blocked before transport: controller=0 request=security_key profile=Seeds; no ECU rejection";
+        let f = classify(refusal, None);
+        assert_eq!(f["kind"], "command_blocked");
+        assert_eq!(f["cause"], "local_policy_refusal");
+        assert_eq!(f["ecu_rejected"], false);
+        assert!(f["message"]
+            .as_str()
+            .unwrap()
+            .contains("Resume in Full session"));
+        for (raw, code) in [
+            ("Nano checksum mismatch", "nano_checksum_mismatch"),
+            ("Nano serial device disconnected", "adapter_disconnected"),
+            (
+                "Native Nano USB write deadline expired; outcome unknown",
+                "transport_timeout",
+            ),
+            ("Nano opcode 48: status 96", "nano_adapter_status"),
+            (
+                "Native Nano USB write failed or was short; outcome unknown",
+                "transport_write_failure",
+            ),
+        ] {
+            assert_eq!(classify(raw, None)["cause"], code);
+        }
+        assert_eq!(
+            classify("Nano opcode 48: status 96", None)["nano_status"],
+            json!({"opcode":72,"status":150})
+        );
+        assert!(nano_status("opcode 48: status 96secret").is_none());
+    }
+    #[test]
+    fn upload_summary_is_whitelisted_and_missing_progress_stays_unknown() {
+        let mut f = classify("Nano checksum mismatch SECRET YS3FD49Y541000000", None);
+        f["request_progress"] = json!({"last_request":"SECRET","potential_change_intents":"SECRET","requests_queued":2});
+        let safe = support_summary(&f).unwrap();
+        assert!(!safe.contains("SECRET") && !safe.contains("YS3"));
+        assert!(
+            safe.contains("potential_change_intents=unknown") && safe.contains("requests_queued=2")
+        );
+        f["cause"] = json!("SECRET");
+        assert!(support_summary(&f).is_none());
     }
 }

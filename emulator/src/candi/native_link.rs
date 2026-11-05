@@ -22,6 +22,7 @@ pub struct NativeLink {
     /// Last frame handed to the adapter and the shared classification of an adapter stop.
     last_tx: Option<tech2_emu::adapter_failure::TxContext>,
     failure: Option<serde_json::Value>,
+    request_progress: tech2_emu::adapter_failure::progress::Progress,
 }
 
 impl NativeLink {
@@ -48,6 +49,7 @@ impl NativeLink {
             events: self.events.clone(),
             last_tx: self.last_tx.clone(),
             failure: self.failure.clone(),
+            request_progress: self.request_progress.clone(),
         })
     }
     pub fn new(path: &Path) -> Result<Self, String> {
@@ -70,6 +72,7 @@ impl NativeLink {
             presence_announced: false,
             last_tx: None,
             failure: None,
+            request_progress: Default::default(),
             events: vec!["virtual application inventory at 0x4000; source=loaded-header+OEM-record-layout; bootloader absent".into()],
         })
     }
@@ -279,7 +282,9 @@ impl NativeLink {
             }
             self.events.push(format!("NANO submit native TX controller={c} ticket={} id={:03X} data={:02X?}; outcome pending",tx.ticket,tx.frame.id,tx.frame.data));
             self.last_tx = Some(tech2_emu::adapter_failure::TxContext::new(c, &tx));
+            self.request_progress.observed(&tx.frame);
             bridge.transmit(c, tx.clone())?;
+            self.request_progress.queued();
             if let Some(m) = &mut self.ignition {
                 m.state.transmitted(c, &tx.frame);
             }
@@ -319,7 +324,8 @@ impl NativeLink {
         if let Err(error) = self.poll_bridge() {
             self.events.push(format!("Native adapter stopped: {error}"));
             let active = self.bridge.as_ref().and_then(|b| b.failure_context());
-            let failure = tech2_emu::adapter_failure::classify_with_backend(&error, self.last_tx.as_ref(), active.as_ref());
+            let mut failure = tech2_emu::adapter_failure::classify_with_backend(&error, self.last_tx.as_ref(), active.as_ref());
+            failure["request_progress"] = self.request_progress.snapshot();
             // One stable, machine-readable line for consoles; report.json carries the same object.
             self.events.push(format!("ADAPTER_FAILURE {failure}"));
             self.failure = Some(failure);

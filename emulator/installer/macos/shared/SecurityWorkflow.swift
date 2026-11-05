@@ -94,13 +94,26 @@ extension Shell {
     do { adapter = try session?.adapter ?? securityResumeAdapter ?? RunAdapterBinding.read(run: run) }
     catch { showError(error.localizedDescription); return }
     if securityView.state=="POST_AUTH" {
+      let needsResume = current?.running != true || current?.mode != .fullNative
       let a=NSAlert();a.messageText="Security data already processed"
       a.informativeText="Keep using the processed security data in the original firmware, or choose a new collection. Reprocessing is not needed for POST-AUTH data. Vehicle authorization is checked by the firmware."
-      a.addButton(withTitle:current != nil ? "Continue firmware":"Keep existing data")
+      a.addButton(withTitle:needsResume && adapter != nil ? "Resume in Full session" : current != nil ? "Continue firmware":"Keep existing data")
       if current?.adapter != nil {a.addButton(withTitle:"Collect fresh data")}
       a.addButton(withTitle:"Cancel")
       let choice=a.runModal()
-      if choice == .alertFirstButtonReturn {window.makeFirstResponder(lcd)}
+      if choice == .alertFirstButtonReturn {
+        if needsResume,let bound=adapter {
+          stop {
+            if bound.kind == .nano, !NanoCleanup.confirmed(run:run) {
+              self.showError("Nano cleanup was not confirmed. The processed card is preserved; keep stopped and review the report.");return
+            }
+            if bound.kind == .mdi, !MdiCleanup.confirmed(run:run) {
+              self.showError("MDI cleanup was not confirmed. The processed card is preserved; keep stopped and review the report.");return
+            }
+            self.resumeSecurity(adapter:bound)
+          }
+        } else {window.makeFirstResponder(lcd)}
+      }
       else if choice == .alertSecondButtonReturn,let connected=current?.adapter {beginFreshSecurity(adapter:connected)}
       return
     }
@@ -230,7 +243,7 @@ extension Shell {
             return
           }
           let a=NSAlert();a.messageText="Security data ready";a.informativeText="The verified response is saved in a new working card. POST-AUTH describes this card, not confirmed vehicle authorization. Keep the same adapter and vehicle connected. Resume starts the original firmware without requiring another VIN read while the ignition may be off. Follow its prompts."
-          a.addButton(withTitle:"Resume diagnostics");a.addButton(withTitle:"Keep stopped")
+          a.addButton(withTitle:"Resume in Full session");a.addButton(withTitle:"Keep stopped")
           if a.runModal() == .alertFirstButtonReturn {self.resumeSecurity(adapter:adapter)}
         }
       }

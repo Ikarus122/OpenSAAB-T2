@@ -467,7 +467,7 @@ impl Backend for Bridge {
                 || self.key_status.allowed(controller, &tx)
         };
         if !allowed {
-            return Err("Native USB command rejected by collection profile".into());
+            return Err(crate::adapter_failure::policy_refusal(controller, &tx, self.profile));
         }
         self.input
             .as_ref()
@@ -1004,12 +1004,16 @@ mod tests {
         if manual_seeds {
             for data in [vec![4,0x27,2,0x12,0x34,0,0,0], vec![2,0x27,0x0c,0,0,0,0,0],
                 vec![2,0xae,1,0,0,0,0,0], vec![4,0x3b,0x60,0x12,0x34,0,0,0]] {
-                assert!(bridge.transmit(2, CanTransmission {
+                let error=bridge.transmit(2, CanTransmission {
                     ticket:1,
                     frame:CanFrame {id:0x241, extended:false, rtr:false, dlc:8, data},
                     btr0:0xdd, btr1:0x36,
                     electrical:CanElectricalState::SingleWireGpio {latch:3, assignment:0, direction:3},
-                }).is_err(), "Manual seed frontend must never queue a key/write");
+                }).unwrap_err();
+                let failure=crate::adapter_failure::classify(&error,None);
+                assert_eq!(failure["kind"],"command_blocked");
+                assert_eq!(failure["cause"],"local_policy_refusal");
+                assert!(error.contains("profile=Seeds"));
             }
         }
         bridge

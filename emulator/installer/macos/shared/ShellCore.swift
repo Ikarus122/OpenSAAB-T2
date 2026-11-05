@@ -86,7 +86,7 @@ enum ChipsoftSessionMode: String, CaseIterable {
   }
   var status: String {
     switch self {
-    case .fullNative: return "Chipsoft · Full native control · Original firmware commands"
+    case .fullNative: return "Chipsoft · Full session · Vehicle changes possible"
     case .readOnly: return "Chipsoft · Read-only diagnostics"
     case .seeds: return "Chipsoft · Collect security seeds · Processing asks for your consent before any request"
     }

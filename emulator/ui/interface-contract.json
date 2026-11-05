@@ -442,6 +442,13 @@
       "privacy": "No raw reason, screen, key values, transport payload, register value or firmware bytes. Unsupported access address, width and direction are numerical emulator diagnostics.",
       "missing_evidence": "Explicitly unavailable or unknown; never infer normal completion or lack of crash.",
       "submission": "Same frozen review, separate consent and explicit send; no automatic upload."
+    },
+    "adapter_stop_summary": {
+      "version": "0.2.29-ecm-preview.1",
+      "field": "recent_sessions[].emulator_outcome.message",
+      "source": "Fixed cause labels, bounded Nano opcode/status integers and passive original-request category/counts",
+      "semantics": "Intent and queue acceptance do not prove transmission, ECU acceptance or persistence. Unknown stays unknown. Not a complete Add phase trace.",
+      "privacy": "No raw adapter error, payload, VIN, key, seed, screen or local path. Existing review and explicit send remain."
     }
   },
   "chipsoft_firmware_identity": {
@@ -1157,5 +1164,23 @@
     "security": "USB collection retains consent and validation; MX+ seed collection/clear/programming remain unavailable",
     "native_components": "Exact bytes, version, architecture, source revision and hashes retained for each candidate",
     "verification": "Source candidate; exact build, installed and physical scopes must be recorded separately"
+  },
+  "session_mode_selection": {
+    "id": "normal-full-session-1",
+    "date": "2026-10-22",
+    "workflow": "Finish setup -> Connect and start -> select adapter -> Full session on the supported firmware binding. No Read-only/Full chooser in the normal connection flow.",
+    "labels": [
+      "Full session"
+    ],
+    "rules": [
+      "Normal product connections on MX+, MDI, Chipsoft and Nano use their existing Full native binding. A saved Read-only preference cannot change the connection or its diagnostic request policy.",
+      "Show Full session and vehicle changes possible as information. Connect and start is the foreground action; no separate authority checkbox or mode dialog is required.",
+      "A missing Full firmware binding remains unavailable. Never substitute a limited read profile or claim an unsupported adapter capability.",
+      "Keep standard CAN frame and electrical-route validation, foreground ownership, cancellation, confirmed cleanup, fresh vehicle identity, original firmware confirmations and ECU security authorization.",
+      "Security-data collection, explicit maintenance actions, offline tools and isolated research probes retain their own scoped workflows. They do not silently change a normal connection or replay a vehicle request.",
+      "Removing the chooser does not itself send a vehicle command, grant security access, clear codes or qualify an adapter. Installed and physical verification remain separate on every target."
+    ],
+    "candidate": "Android ARM64 preview.40 built and installed on Fire; exact APK/all eight native hashes and idle Full-session UI verified. Emulator old-READ preference, binding mapping and layout checks passed without vehicle operations. Four-adapter physical Full paths pending.",
+    "other_targets": "macOS USB adoption in 0.2.29-ecm-preview.1; package/installed/physical scopes recorded separately. Mac MX+ retains its limited binding. Other targets retain their separate adoption and qualification records."
   }
 }

@@ -8,6 +8,8 @@ enum USBChooserChecks {
     // No serial handle, vehicle commands, runtime state or security service.
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    let previousMode = UserDefaults.standard.object(forKey:"chipsoftSessionMode")
+    defer { if let previousMode=previousMode {UserDefaults.standard.set(previousMode,forKey:"chipsoftSessionMode")} else {UserDefaults.standard.removeObject(forKey:"chipsoftSessionMode")} }
     let profiles = try USBAdapterDiscovery.profiles(contract)
     func candidate(_ port:String,_ vendor:Int,_ product:Int) -> USBAdapterCandidate {
       USBAdapterDiscovery.candidate(port:port,vendor:vendor,product:product,profiles:profiles)!
@@ -17,7 +19,7 @@ enum USBChooserChecks {
     let nano = candidate("/dev/cu.usbmodem0",0x1a86,0x55d3)
     var fixture = USBDiscoverySnapshot(candidates:[],waitingForSerial:[])
     var scanFailed = false
-    let chooser = USBAdapterChooser(readCodes:false,mode:.readOnly) {
+    let chooser = USBAdapterChooser(readCodes:false) {
       if scanFailed { throw ShellError.message("Synthetic registry error") }
       return fixture
     }
@@ -34,7 +36,7 @@ enum USBChooserChecks {
         case 0:
           guard app.modalWindow === chooser.alert.window else { return }
           try ShellChecks.need(chooser.selected == nil && !chooser.alert.buttons[0].isEnabled,"empty registry cannot connect")
-          chooser.modePicker.selectItem(withTitle:ChipsoftSessionMode.seeds.rawValue)
+          UserDefaults.standard.set(ChipsoftSessionMode.seeds.rawValue,forKey:"chipsoftSessionMode")
           let count = chooser.scanCount
           chooser.alert.buttons[1].performClick(nil)
           try ShellChecks.need(chooser.scanCount == count+1 && app.modalWindow === chooser.alert.window,"Refresh scans in place without recreating or closing the modal")
@@ -46,14 +48,14 @@ enum USBChooserChecks {
           fixture = USBDiscoverySnapshot(candidates:[a],waitingForSerial:[]); phase = 2
         case 2:
           guard chooser.selected?.port == a.port else { return }
-          try ShellChecks.need(chooser.alert.buttons[0].isEnabled && chooser.mode == .seeds,"late serial arrival updates an already-open modal and preserves mode")
+          try ShellChecks.need(chooser.alert.buttons[0].isEnabled && chooser.mode == .fullNative,"late serial arrival updates an already-open modal and uses Full despite a saved collection mode")
           fixture = USBDiscoverySnapshot(candidates:[nano,a,b],waitingForSerial:[])
           chooser.alert.buttons[1].performClick(nil)
           try ShellChecks.need(chooser.selected?.port == a.port,"inserting an earlier popup row preserves selected port rather than index")
           chooser.list.selectItem(at:2); chooser.selectionChanged(nil)
           fixture = USBDiscoverySnapshot(candidates:[a,b],waitingForSerial:[])
           chooser.alert.buttons[1].performClick(nil)
-          try ShellChecks.need(chooser.selected?.port == b.port && chooser.mode == .seeds,"Refresh preserves explicit adapter and mode")
+          try ShellChecks.need(chooser.selected?.port == b.port && chooser.mode == .fullNative,"Refresh preserves explicit adapter and Full session")
           fixture = USBDiscoverySnapshot(candidates:[],waitingForSerial:[]); phase = 3
         case 3:
           guard chooser.selected == nil else { return }
@@ -79,12 +81,12 @@ enum USBChooserChecks {
     observer.invalidate(); deadline.invalidate()
     chooser.alert.window.orderOut(nil)
     if let error = failure { throw error }
-    try ShellChecks.need(phase == 4 && !watchdogUsed && result?.0.port == b.port && result?.1 == .seeds,"explicit Connect returns the current adapter and selected mode after modal hotplug")
+    try ShellChecks.need(phase == 4 && !watchdogUsed && result?.0.port == b.port && result?.1 == .fullNative,"explicit Connect returns the current adapter and Full session after modal hotplug")
     let count = chooser.scanCount
     chooser.refreshNow()
     try ShellChecks.need(!chooser.active && chooser.scanCount == count,"dismissed chooser rejects later refresh and stops polling")
 
-    let restricted = USBAdapterChooser(readCodes:true,mode:.fullNative) {
+    let restricted = USBAdapterChooser(readCodes:true) {
       USBDiscoverySnapshot(candidates:[nano],waitingForSerial:[])
     }
     let cancel = schedule(0.03) {

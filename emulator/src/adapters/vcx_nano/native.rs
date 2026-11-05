@@ -67,7 +67,7 @@ pub fn encode_for_profile(
     profile: Profile,
 ) -> Result<Frame, String> {
     if !allowed_for_profile(controller, tx, profile) {
-        return Err("Native Android session gate rejected request".into());
+        return Err(crate::adapter_failure::policy_refusal(controller, tx, profile));
     }
     encode_authorized(controller, tx, sequence)
 }
@@ -238,7 +238,7 @@ impl TxLedger {
                 || self.key_status.allowed(controller, tx)
         };
         if !allowed {
-            return Err("Native Android command/continuation gate rejected request".into());
+            return Err(crate::adapter_failure::policy_refusal(controller, tx, profile));
         }
         let frame = encode_authorized(controller, tx, sequence)?;
         let prepared = Prepared {

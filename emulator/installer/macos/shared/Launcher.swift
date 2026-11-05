@@ -907,7 +907,7 @@ final class Shell: NSObject, NSApplicationDelegate, NSWindowDelegate {
   @objc func about() {
     textDialog(
       "OpenSAAB T2 · macOS \(shellVersion)",
-      "Native \(shellArchitectureLabel) · Android-reference interface\n\nOriginal firmware menus, keypad, offline mode and diagnostic-language selection. Application controls currently remain English.\n\nUSB adapters: Chipsoft Pro and the VCX Nano preview verify identity and a fresh VIN before opening the diagnostic menus. The native MDI preview uses the Android-reference shared USB transport and original guest menus; exact-build hardware checks are required. Bluetooth adapters: OBDLink MX+ (owner unit STN2255 v5.12.4) uses Connect and start: fresh VIN discovery, adapter release, then the original firmware read-only over the same MX+ on the Android preview.18 MX+ engine; Mac hardware validation is pending. Legacy Carista EVO / vLinker MC+ support is limited to VIN and Trionic 8 engine reads; native I-bus diagnostics and SW-CAN wake are unavailable. Exact-build live workflows require separate hardware validation. Session modes follow Android: Full native control, Read-only diagnostics, and Collect security seeds. Security processing/import and passive saved DTC reports use the shared Rust workers."
+      "Native \(shellArchitectureLabel) · Android-reference interface\n\nOriginal firmware menus, keypad, offline mode and diagnostic-language selection. Application controls currently remain English.\n\nUSB adapters: Chipsoft Pro and the VCX Nano preview verify identity and a fresh VIN before opening the diagnostic menus. The native MDI preview uses the Android-reference shared USB transport and original guest menus; exact-build hardware checks are required. Bluetooth adapters: OBDLink MX+ (owner unit STN2255 v5.12.4) uses Connect and start: fresh VIN discovery, adapter release, then the original firmware read-only over the same MX+ on the Android preview.18 MX+ engine; Mac hardware validation is pending. Legacy Carista EVO / vLinker MC+ support is limited to VIN and Trionic 8 engine reads; native I-bus diagnostics and SW-CAN wake are unavailable. Exact-build live workflows require separate hardware validation. Normal USB connections use Full session regardless of old limited-mode preferences. Security collection is a separate workflow; processing offers Resume in Full session. This preview does not qualify ECM Add/Remove. Security processing/import and passive saved DTC reports use the shared Rust workers."
     )
   }
   func popup(_ entries: [(String, () -> Void)], anchor: NSView? = nil) {
@@ -1157,14 +1157,11 @@ final class Shell: NSObject, NSApplicationDelegate, NSWindowDelegate {
       }
       profiles = try USBAdapterDiscovery.profiles(contract)
     } catch { attempt.finish("FAILED", "IO_ERROR"); showError(error.localizedDescription); return }
-    let savedMode = UserDefaults.standard.string(forKey:"chipsoftSessionMode") ?? ""
     let chooser = USBAdapterChooser(readCodes:readCodes,
-      mode:ChipsoftSessionMode(rawValue:savedMode) ?? .fullNative,
       scan:{ try USBAdapterDiscovery.snapshot(profiles:profiles) })
     guard let (candidate,mode) = chooser.run(),let kind = candidate.profile?.kind else {
       attempt.finish("CANCELLED", "USER_STOP"); return
     }
-    if mode != .seeds { UserDefaults.standard.set(mode.rawValue, forKey: "chipsoftSessionMode") }
     let port = candidate.port
     if kind == .mdi {
       attempt.selectAdapter("MDI");self.connectionAttempt=attempt

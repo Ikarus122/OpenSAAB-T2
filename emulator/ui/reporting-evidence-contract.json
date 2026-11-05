@@ -20,7 +20,8 @@
     "primary_reason": "First terminal reason wins; subsequent cleanup cannot replace it",
     "artifacts": "State each bounded report/crash/session-end/performance/binding/startup/cleanup artifact as available, missing, invalid, unreadable or oversize",
     "terminal_fault": "Unsigned 32-bit terminal PC and at most 32 recent PCs, no registers, stack bytes or screen; terminal PC is not asserted to be original fault",
-    "cleanup": "Separate child exit, forced termination, USB release and protocol cleanup. Unknown is never success"
+    "cleanup": "Separate child exit, forced termination, USB release and protocol cleanup. Unknown is never success",
+    "adapter_stop_summary": "Existing emulator_outcome.message carries whitelisted fixed cause, numeric Nano opcode/status and passive request intent counts. No raw error or payload. Vehicle state remains unknown; not a durable-write or complete Add phase assertion."
   },
   "retention": "Retain error-associated session before other recent sessions when an ID is known; at most 5 sessions and 20 attempts; explicitly label bounded/truncated evidence",
   "privacy": "Review and explicit send consent retained. No raw bus traffic, VIN, seed/key data, credentials or firmware uploaded. Typed artifact availability never includes local paths. Description is user-entered.",

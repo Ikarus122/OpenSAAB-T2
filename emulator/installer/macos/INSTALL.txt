@@ -26,3 +26,17 @@ new physical adapter/vehicle tests and complete common conformance remain pendin
 macOS 12 or later. Ad-hoc signed; not notarized. Matching source, package manifest
 and SHA-256 accompany this candidate. To roll back, close it and reopen a retained
 versioned app. Historical bundles and user data are preserved.
+
+ECM diagnostic preview scope: normal USB connections use Full session, even if
+an earlier version saved a limited-mode preference. Full session allows vehicle
+changes through the original firmware. Get security access keeps collection and
+processing separate and offers Resume in Full session after import.
+
+This preview improves mode handoff and failure reporting. Viktor's original stop
+has not been reproduced; successful T8 ECM Add/Remove is unverified. Initial
+checks should use ECU information and security collection/processing only.
+Do not use an Add/Remove retry on an installed vehicle as the first test. Original
+Add can request VIN/pairing changes before a later security failure. Further Add
+validation needs an isolated setup with verified recovery. A report is prepared,
+reviewed and sent only by your explicit action; include the workflow step where
+the stop occurred. Do not post raw vehicle/security logs publicly.

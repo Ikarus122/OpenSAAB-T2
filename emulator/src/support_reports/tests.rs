@@ -206,3 +206,17 @@ fn triggering_session_is_retained_and_sampling_is_explicit() {
     fs::write(incident.join("host-performance.json"),json!({"performance_schema":1,"sample_count":71,"max_frame_age_ms":52000,"samples":[{"elapsed_ms":1},{"elapsed_ms":2}]}).to_string()).unwrap();
     let p=performance(&incident);assert_eq!(p["retained_sample_count"],2);assert_eq!(p["samples_truncated"],true);assert_eq!(p["max_frame_age_ms"],52000);
 }
+
+#[test]
+fn first_adapter_failure_survives_upload_and_later_operator_stop_without_raw_secrets() {
+    let root=fixture();let run=root.join("runs/incident");fs::create_dir(&run).unwrap();
+    let mut failure=crate::adapter_failure::classify("Nano opcode 48: status 96 PRIVATE-VIN-KEY",None);
+    failure["request_progress"]=json!({"request_intents":4,"requests_queued":3,"potential_change_intents":2,"security_key_intents":1,"last_request":"security_key","raw":"PRIVATE-VIN-KEY"});
+    fs::write(run.join("report.json"),json!({"status":"incomplete","exit_code":3,"adapter_failure":failure}).to_string()).unwrap();
+    fs::write(run.join("session-end.json"),json!({"reason":"user_stop","exit_code":3}).to_string()).unwrap();
+    let report=collect(&root,"",&mac()).unwrap();
+    let message=report["recent_sessions"][0]["emulator_outcome"]["message"].as_str().unwrap();
+    assert!(message.contains("cause=nano_adapter_status") && message.contains("adapter_status=96") && message.contains("potential_change_intents=2") && message.contains("vehicle_state=unknown"));
+    assert!(!report.to_string().contains("PRIVATE"));
+    assert_eq!(report["recent_sessions"][0]["session_end"]["reason"],"user_stop");
+}

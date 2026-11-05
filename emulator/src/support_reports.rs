@@ -303,6 +303,9 @@ fn session(dir: &Path) -> Value {
         if let Some(kind) = raw["adapter_failure"]["kind"].as_str().filter(|k| FAILURE_KINDS.contains(k)) {
             o.insert("reason".into(), json!(kind));
         }
+        if let Some(summary)=crate::adapter_failure::support_summary(&raw["adapter_failure"]) {
+            o.insert("message".into(),json!(summary));
+        }
         s.insert("emulator_outcome".into(), Value::Object(o));
         let crash = small_json(&dir.join("crash.json"),1_048_576);
         let screen = crash.as_ref().and_then(|c|c["screen"].as_str()).unwrap_or("");

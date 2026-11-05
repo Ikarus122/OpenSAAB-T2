@@ -7,7 +7,6 @@ import Foundation
 final class USBAdapterChooser: NSObject {
   let alert = NSAlert()
   let list = NSPopUpButton(frame:NSRect(x:0,y:0,width:430,height:30))
-  let modePicker = NSPopUpButton(frame:NSRect(x:0,y:0,width:430,height:30))
   let reason = USBAdapterChooser.label("")
   let scanStatus = USBAdapterChooser.label("")
   let checked = USBAdapterChooser.label("")
@@ -19,7 +18,7 @@ final class USBAdapterChooser: NSObject {
   private(set) var active = false
   private(set) var accepted: USBAdapterCandidate?
 
-  init(readCodes:Bool,mode:ChipsoftSessionMode,scan:@escaping () throws -> USBDiscoverySnapshot) {
+  init(readCodes:Bool,scan:@escaping () throws -> USBDiscoverySnapshot) {
     self.readCodes = readCodes; self.scan = scan
     super.init()
     alert.messageText = "USB adapters"
@@ -32,11 +31,9 @@ final class USBAdapterChooser: NSObject {
     alert.buttons[0].target = self; alert.buttons[0].action = #selector(connect(_:))
     alert.buttons[1].target = self; alert.buttons[1].action = #selector(refreshClicked(_:))
     list.target = self; list.action = #selector(selectionChanged(_:))
-    modePicker.addItems(withTitles:ChipsoftSessionMode.allCases.map{$0.rawValue})
-    modePicker.selectItem(withTitle:mode.rawValue)
-    let options = NSStackView(views:[Self.label("Detected USB adapter"),list,Self.label("Session mode"),modePicker,reason,scanStatus,checked,
+    let options = NSStackView(views:[Self.label("Detected USB adapter"),list,Self.label(readCodes ? "Separate engine-code report" : "Full session · Vehicle changes possible"),reason,scanStatus,checked,
       Self.label("The list updates while this window is open. Refresh checks again. Detecting an adapter does not connect to the car."),
-      Self.label("Full native control follows the original diagnostic menus, including ignition-key tests. Read-only mode blocks control operations. Get security access collects seeds, requests your processing consent and imports a verified response.")])
+      Self.label("Full session follows the original diagnostic menus and confirmations. Get security access uses a separate collection session, requests your processing consent and imports a verified response. Resume in Full session continues diagnostics; POST-AUTH does not confirm vehicle authorization.")])
     options.orientation = .vertical; options.spacing = 8; options.alignment = .leading
     options.frame = NSRect(x:0,y:0,width:460,height:330)
     options.widthAnchor.constraint(equalToConstant:460).isActive = true
@@ -53,7 +50,7 @@ final class USBAdapterChooser: NSObject {
   var selected: USBAdapterCandidate? {
     candidates.indices.contains(list.indexOfSelectedItem) ? candidates[list.indexOfSelectedItem] : nil
   }
-  var mode: ChipsoftSessionMode { ChipsoftSessionMode.allCases[modePicker.indexOfSelectedItem] }
+  var mode: ChipsoftSessionMode { .fullNative }
 
   func run() -> (USBAdapterCandidate,ChipsoftSessionMode)? {
     active = true; accepted = nil
