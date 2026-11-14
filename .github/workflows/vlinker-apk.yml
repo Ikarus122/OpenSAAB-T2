@@ -29,6 +29,13 @@ jobs:
           echo "Using $NDK"
           "$SDKM" "platforms;android-36" "build-tools;36.0.0" "$NDK" > /dev/null
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK#ndk;}" >> "$GITHUB_ENV"
+      - name: macOS java_home shim (report_dependencies.py expects it)
+        run: |
+          printf '#!/bin/sh
+echo "%s"
+' "$JAVA_HOME" | sudo tee /usr/libexec/java_home > /dev/null
+          sudo chmod +x /usr/libexec/java_home
+          /usr/libexec/java_home -v 21
       - name: Debug signing key
         run: |
           mkdir -p ~/.android
