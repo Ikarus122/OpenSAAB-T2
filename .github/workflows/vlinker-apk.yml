@@ -40,6 +40,8 @@ jobs:
           mkdir -p ~/.android
           keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey \
             -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+      - name: Throwaway signing key for this fork build (Gradle requires one)
+        run: python3 scripts/android/init-release-signing.py
       - name: Rust emulator for Android
         run: sh scripts/android/build-headless.sh
       - name: Firmware-free APK
