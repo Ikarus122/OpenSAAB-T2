@@ -46,8 +46,11 @@ const MONITOR: &str = "ATMA";
 /// also passes the unused 0x218/0x278). Accept-all monitoring of the P-bus (~200 frames/s
 /// on a 2006 9-5) overruns the Bluetooth link: after an interrupt the adapter kept
 /// flushing for more than 2 s, so the request could never be sent (vehicle trace).
+/// Responses on (`ATR1`, 100 ms `ATST19`): the T7 answers within milliseconds, before
+/// `ATMA` can be restarted over Bluetooth, so with `ATR0` the 0x238 session reply was
+/// lost on the car. Replies printed before the prompt are delivered like monitor frames.
 const SETUP: [&str; 14] = [
-    "ATL0", "ATS1", "ATH1", "ATD1", "ATV1", "ATAL", "ATCAF0", "ATCFC0", "ATR0", "ATAT0", "ATST0A",
+    "ATL0", "ATS1", "ATH1", "ATD1", "ATV1", "ATAL", "ATCAF0", "ATCFC0", "ATR1", "ATAT0", "ATST19",
     "ATSP6", "ATCF218", "ATCM79F",
 ];
 
@@ -405,7 +408,7 @@ impl Bridge {
                         link.active_tx.as_mut().unwrap().phase = "can-request";
                         link.send(&data)?;
                         link.finish_request(&events)?;
-                        link.record(serde_json::json!({"ordinary_request_terminal_prompt":{"controller":controller,"ticket":tx.ticket},"responses_off":true,"original_CANdi_flow_control_owner":true,"electrical_ACK_verified":false}))?;
+                        link.record(serde_json::json!({"ordinary_request_terminal_prompt":{"controller":controller,"ticket":tx.ticket},"responses_on":true,"original_CANdi_flow_control_owner":true,"electrical_ACK_verified":false}))?;
                         events
                             .try_send(Event::Completed {
                                 controller,
@@ -597,7 +600,7 @@ mod tests {
     #[test]
     fn setup_sends_no_stn_commands() {
         assert!(SETUP.iter().all(|c| c.starts_with("AT")));
-        assert!(SETUP.contains(&"ATSP6") && SETUP.contains(&"ATCAF0") && SETUP.contains(&"ATR0"));
+        assert!(SETUP.contains(&"ATSP6") && SETUP.contains(&"ATCAF0") && SETUP.contains(&"ATR1"));
         assert!(SETUP.contains(&"ATCF218") && SETUP.contains(&"ATCM79F"));
         // The filter passes both T7 reply IDs and none of the busy P-bus IDs seen on a 2006 9-5.
         let passes = |id: u32| id & 0x79f == 0x218;

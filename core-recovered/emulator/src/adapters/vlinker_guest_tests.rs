@@ -53,7 +53,6 @@ impl Peer {
             let mut monitor = false;
             let mut ordinary_reads = 0;
             let mut requests = 0;
-            let mut fragment_sent = false;
             loop {
                 let mut line = String::new();
                 let Ok(n) = reader.read_line(&mut line) else {
@@ -104,14 +103,18 @@ impl Peer {
                         serde_json::json!({"type":"rx","bytes":bytes}).to_string()
                     } else if ordinary {
                         ordinary_reads += 1;
-                        // ATR0: the adapter answers the prompt without waiting for replies.
+                        // ATR1: the reply (captured on a 2006 9-5 T7) arrives fragmented
+                        // before the prompt that ends the ordinary request.
                         let bytes = if requests == 1 {
                             match mode {
                                 Mode::MissingPrompt => Vec::new(),
                                 Mode::CanError => b"CAN ERROR\r\r>".to_vec(),
                                 Mode::BufferFull => b"BUFFER FULL\r\r>".to_vec(),
                                 Mode::Stopped => b"STOPPED\r\r>".to_vec(),
-                                _ => b"\r>".to_vec(),
+                                _ => match ordinary_reads {
+                                    1 => b"258 8 C5 BF 20 5A 97".to_vec(),
+                                    _ => b" 39 2D 35\r\r>".to_vec(),
+                                },
                             }
                         } else {
                             b"\r>".to_vec()
@@ -124,13 +127,6 @@ impl Peer {
                         } else {
                             serde_json::json!({"type":"rx","bytes":bytes}).to_string()
                         }
-                    } else if monitor && requests >= 1 && !fragment_sent {
-                        // A fragmented T7 reply (captured on a 2006 9-5) arrives while monitoring.
-                        fragment_sent = true;
-                        replies.push_back(b"258 8 C5 BF 20 5A 97".to_vec());
-                        replies.push_back(b" 39 2D 35\r".to_vec());
-                        serde_json::json!({"type":"rx","bytes":replies.pop_front().unwrap()})
-                            .to_string()
                     } else {
                         "EMPTY".to_string()
                     }
@@ -213,26 +209,27 @@ fn run(backend: &mut dyn Backend, done: impl Fn(&[Event]) -> bool) -> (Vec<Event
 }
 
 #[test]
-fn hs_can_request_finishes_at_prompt_then_monitoring_receives_fragmented_t7_reply() {
+fn hs_can_request_delivers_fragmented_t7_reply_before_completion() {
     let (peer, link) = Peer::open(Mode::Success);
     let mut backend =
         crate::can_adapter::TranslationBackend::new(Box::new(Bridge::from_link(link)));
     backend.transmit(0, tx(0, 42)).unwrap();
     let (events, error) = run(&mut backend, |e| {
-        e.iter().any(|e| matches!(e, Event::Received(..)))
+        e.iter().any(|e| matches!(e, Event::Completed { .. }))
     });
     assert_eq!(error, None);
+    // ATR1: the reply printed before the prompt is delivered first, then the completion.
+    assert!(
+        matches!(&events[0], Event::Received(0, f) if f.id == 0x258 && f.dlc == 8 && f.data == [0xc5, 0xbf, 0x20, 0x5a, 0x97, 0x39, 0x2d, 0x35])
+    );
     assert!(matches!(
-        events[0],
+        events[1],
         Event::Completed {
             controller: 0,
             ticket: 42,
             ..
         }
     ));
-    assert!(
-        matches!(&events[1], Event::Received(0, f) if f.id == 0x258 && f.dlc == 8 && f.data == [0xc5, 0xbf, 0x20, 0x5a, 0x97, 0x39, 0x2d, 0x35])
-    );
     backend.close();
     let commands = peer.close();
     let setup: Vec<_> = commands
