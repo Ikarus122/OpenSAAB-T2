@@ -1,4 +1,4 @@
-# Shared vLinker workflow, version 0.1.3
+# Shared vLinker workflow, version 0.1.4
 
 This is the canonical dependency for Android and iOS VIN-first startup,
 Trionic 8 HS-CAN identification/current-history DTC probes, connection ownership,
@@ -6,7 +6,7 @@ and durable ECM reports. Java and Swift supply native transport, lifecycle,
 storage roots and UI effects; they do not select vehicle commands or decode CAN.
 The wider original-firmware emulator is not consolidated by this package.
 
-Both consumers use `version = "=0.1.3"` and a local path to this directory.
+Both consumers use `version = "=0.1.4"` and a local path to this directory.
 Keep `OpenSAAB`, `OpenSAAB-iOS`, and `OpenSAAB-T2-beta-diagnostics` as sibling
 checkouts. The Android connection executable is built from canonical
 `OpenSAAB/emulator`; iOS links the same package through its emulator crate.
@@ -15,7 +15,7 @@ Consumers build with their checked-in lockfiles (`--locked`).
 `SOURCE_SHA256` pins Cargo.toml, build.rs and every Rust source. The build
 rejects a source change until the package version/pin is deliberately reviewed.
 The report manifest records version and SHA-256 of this pin file. Current pin:
-`41d0d75ffe4d99a811cb4dcc0e3cfb56ea76889f808df52a9b48305bbdc9b760`.
+`67a66cf49f1ef038967c807d288a4b6c4a3b92ede0c91ea0c8890f0a8423d1b8`.
 
 Verify locally:
 
@@ -74,3 +74,11 @@ This internal refactor retains package 0.1.3 with a new reviewed source inventor
 its pin distinguishes it from installed 0.1.3 artifacts. No new native library,
 APK or public release was produced. Historical hardware receipts retain their
 original pin (`d34004c8c619947b9edb61ea710c5c59791ccda87d425bb060bdce2a8f73d65e`). Installed regression is pending.
+
+November 14 Trionic 7 VIN fallback (0.1.4): when an identified vLinker MC+ gets NO DATA
+for the GMLAN VIN read on 7E0, identification reads the VIN the Trionic 7 way:
+KWP2000-over-CAN session open on 0x220 (reply 0x238), `1A 90` on 0x240, reply lines on
+0x258 acknowledged on 0x266, with a T7-only receive filter and an expected-response count
+(`… 1`) so each acknowledgement leaves within the T7's window. Read-only, no replay of the
+GMLAN request. Verified on a 2006 Saab 9-5 (Trionic 7) with a vLinker MC+ (MIC3313
+V2.0.92) through a PC byte bridge driving this Session; not yet run from an installed APK.

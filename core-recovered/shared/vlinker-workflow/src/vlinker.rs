@@ -14,6 +14,8 @@ pub fn allowed(command: &str) -> bool {
     [crate::adapter_identity::Model::VlinkerMcPlus, crate::adapter_identity::Model::CaristaEvo, crate::adapter_identity::Model::ObdlinkMxp]
         .iter().any(|model| model.profile().startup.contains(&command))
         || PROBE_COMMANDS.contains(&command)
+        || T7_VIN_STEPS.contains(&command)
+        || T7_ACKS.contains(&command)
 }
 
 // Bounded, explicit host reads derived from Trionic8.cs; no clear/write/security services.
@@ -45,10 +47,40 @@ const PROBE_COMMANDS: [&str; 14] = [
     "ATCM5FF",
     "ATSTFF",
 ];
+// Trionic 7 (Saab 9-5 OG / 9-3 OG) VIN fallback for vLinker MC+ identification.
+// A T7 does not answer GMLAN ISO-TP on 7E0, so VIN_REQUEST returns NO DATA. The T7
+// answers its own KWP2000-over-CAN read instead (the T7Suite framing): open 0x220 ->
+// 0x238, request 1A 90 on 0x240, ECM reply lines on 0x258, each acknowledged on 0x266.
+// Read-only; captured on a 2006 9-5 (EU0DF24C.55P) through a vLinker MC+ (MIC3313).
+// The trailing " 1" tells the ELM to return as soon as one reply frame arrives. The
+// T7 drops the transfer when an acknowledgement comes late: waiting for the listen
+// window to expire before the next command made the first acknowledgement get NO DATA
+// on the car, while with " 1" all four VIN lines arrived (20-80 ms per exchange).
+pub const T7_OPEN: &str = "3F81001102400000 1";
+pub const T7_VIN: &str = "40A1021A90000000 1";
+/// Acknowledgement of reply line `0x80|k`. Every one but the last expects the next line.
+pub const T7_ACKS: [&str; 8] = [
+    "40A13F8000000000",
+    "40A13F8100000000 1",
+    "40A13F8200000000 1",
+    "40A13F8300000000 1",
+    "40A13F8400000000 1",
+    "40A13F8500000000 1",
+    "40A13F8600000000 1",
+    "40A13F8700000000 1",
+];
+/// Raw 11-bit frames, adapter flow control off, T7 reply filter (0x238/0x258), replies on,
+/// 100 ms listen window (only the final acknowledgement waits it out, for NO DATA).
+const T7_VIN_STEPS: [&str; 10] = [
+    "ATCFC0", "ATCF218", "ATCM79F", "ATR1", "ATST19", "ATSH220", T7_OPEN, "ATSH240", T7_VIN,
+    "ATSH266",
+];
 pub fn vehicle_command(command: &str) -> bool {
     command == VIN_REQUEST
         || INFO_READS.iter().any(|r| r.0 == command)
         || [SESSION_START, DTC_READ, SESSION_STOP].contains(&command)
+        || [T7_OPEN, T7_VIN].contains(&command)
+        || T7_ACKS.contains(&command)
 }
 /// Raw header-on CAF0 frame parsing, with no guessed DLC or synthetic payload.
 fn frames(reply: &str) -> Result<Vec<(u32, [u8; 8])>, String> {
@@ -224,8 +256,45 @@ pub struct Session {
     firmware: String,
     voltage: String,
     vin: String,
+    /// Trionic 7 fallback: assembled `len, 5A 90, VIN...` payload, or None when unused.
+    t7_payload: Option<Vec<u8>>,
 }
 impl Session {
+    /// Only an identified vLinker MC+ in VIN mode, after the GMLAN VIN read got NO DATA.
+    fn t7_fallback_allowed(&self) -> bool {
+        self.mode == "vin"
+            && self.read_vin
+            && self.model == Some(crate::adapter_identity::Model::VlinkerMcPlus)
+            && self.vin.is_empty()
+            && self.t7_payload.is_none()
+    }
+    fn t7_line(reply: &str, seq: u8) -> Result<[u8; 8], String> {
+        let lines: Vec<_> = frames(reply)?
+            .into_iter()
+            .filter(|(id, _)| *id == 0x258)
+            .collect();
+        match lines.as_slice() {
+            [(_, data)] if data[0] == seq && data[1] == 0xbf => Ok(*data),
+            [] => Err("Trionic 7 VIN reply line missing".into()),
+            _ => Err("Unexpected Trionic 7 VIN reply line".into()),
+        }
+    }
+    fn t7_finish(&mut self) -> Result<(), String> {
+        let payload = self.t7_payload.as_ref().ok_or("Trionic 7 VIN not started")?;
+        let len = usize::from(*payload.first().ok_or("Empty Trionic 7 VIN reply")?);
+        let body = payload.get(1..1 + len).ok_or("Incomplete Trionic 7 VIN reply")?;
+        if len != 19 || body[..2] != [0x5a, 0x90] {
+            return Err("Unexpected Trionic 7 VIN reply".into());
+        }
+        let vin = std::str::from_utf8(&body[2..]).map_err(|_| "Invalid Trionic 7 VIN bytes")?;
+        if !vin.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+            || !vin.starts_with("YS3")
+        {
+            return Err("Invalid Saab VIN characters".into());
+        }
+        self.vin = vin.to_owned();
+        Ok(())
+    }
     // Pure protocol sessions can replay offline fixtures; native bindings must claim ownership.
     pub fn owned(mut self) -> Self { self.owned = true; self }
     fn claim(&mut self, event: &Value) -> bool {
@@ -245,6 +314,7 @@ impl Session {
             owned: false,
             lease: None,
             commands: COMMANDS[..if read_vin { 13 } else { 5 }].to_vec(),
+            t7_payload: None,
             mode: "vin",
             ecm: serde_json::Map::new(),
             dtc: None,
@@ -392,6 +462,45 @@ impl Session {
                 }
             }
             VIN_REQUEST => self.vin = parse_vin(reply)?,
+            T7_OPEN => {
+                if !frames(reply)?
+                    .iter()
+                    .any(|(id, data)| *id == 0x238 && data[..2] == [0x40, 0xbf])
+                {
+                    return Err("Trionic 7 session open was not confirmed".into());
+                }
+            }
+            T7_VIN => {
+                let first = frames(reply)?
+                    .into_iter()
+                    .find(|(id, data)| *id == 0x258 && data[0] & 0xc0 == 0xc0)
+                    .ok_or("Trionic 7 VIN reply missing")?
+                    .1;
+                if first[1] != 0xbf || first[3..5] != [0x5a, 0x90] {
+                    return Err("Trionic 7 rejected the VIN read".into());
+                }
+                let remaining = usize::from(first[0] & 0x3f);
+                if remaining >= T7_ACKS.len() {
+                    return Err("Trionic 7 VIN reply too long".into());
+                }
+                self.t7_payload = Some(first[2..].to_vec());
+                // After the next ATSH266: acknowledge every line, last one included.
+                let acks = (0..=remaining).rev().map(|k| T7_ACKS[k]);
+                self.commands.splice(self.index + 2..self.index + 2, acks);
+            }
+            command if T7_ACKS.contains(&command) => {
+                let k = T7_ACKS.iter().position(|a| *a == command).unwrap();
+                if k == 0 {
+                    // The final acknowledgement has no reply; the VIN is now complete.
+                    self.t7_finish()?;
+                } else {
+                    let line = Self::t7_line(reply, 0x80 | (k as u8 - 1))?;
+                    self.t7_payload
+                        .as_mut()
+                        .ok_or("Trionic 7 VIN not started")?
+                        .extend_from_slice(&line[2..]);
+                }
+            }
             SESSION_START => {
                 if !frames(reply)?
                     .iter()
@@ -480,9 +589,22 @@ impl Session {
                 if !self.prompt.done {
                     return json!({"state":"waiting"});
                 }
-                let raw = String::from_utf8_lossy(&self.prompt.bytes);
-                let reply = match checked(self.commands[self.index], &raw) {
+                let raw = String::from_utf8_lossy(&self.prompt.bytes).into_owned();
+                let command = self.commands[self.index];
+                let reply = match checked(command, &raw) {
                     Ok(reply) => reply,
+                    Err(error) if error.ends_with(": NO DATA") && command == VIN_REQUEST && self.t7_fallback_allowed() => {
+                        // A Trionic 7 ignores GMLAN ISO-TP: read its VIN the T7 way instead.
+                        // One read of a different ECM protocol, not a replay of the request.
+                        let completed = json!({"command":command, "reply":"NO DATA", "trionic7_fallback":true});
+                        self.commands.splice(self.index + 1..self.index + 1, T7_VIN_STEPS);
+                        self.index += 1;
+                        let mut result = self.emit();
+                        result["completed"] = completed;
+                        return result;
+                    }
+                    // The final T7 acknowledgement gets no reply line by design.
+                    Err(error) if error.ends_with(": NO DATA") && command == T7_ACKS[0] && self.t7_payload.is_some() => "NO DATA".to_owned(),
                     Err(error) => return self.fail(error),
                 };
                 if let Err(error) = self.validate(&reply) {
@@ -497,6 +619,9 @@ impl Session {
                         return result;
                     }
                     let mut display = if self.read_vin { format!("{} · 500 kbit/s\nVIN: {}\n", if self.mode == "vin" { "Vehicle identification · HS-CAN" } else { "HS-CAN ECM probe" }, self.vin) } else { "Bluetooth adapter identification\n".to_owned() };
+                    if self.t7_payload.is_some() {
+                        display += "ECM: Trionic 7 · VIN read 1A 90 on 0x240\n";
+                    }
                     display += &format!("Adapter: {}\n", self.model.unwrap().label());
                     if self.mode == "ecm_info" {
                         for (_, _, label) in INFO_READS {
@@ -529,6 +654,7 @@ impl Session {
                     let result = json!({"state":"complete", "completed":completed,
                         "result":{"mode":self.mode,"ecm_identifiers":self.ecm,"dtc_report":self.dtc,"display":display,"diagnostic_session_stopped":!self.diagnostic_active,"adapter_model":self.model.unwrap().id(),"adapter_label":self.model.unwrap().label(),"command_family":if self.model == Some(crate::adapter_identity::Model::ObdlinkMxp) {"STN"} else {"MIC"},"profile_id":if self.mode == "vin" { self.model.unwrap().vin_profile_id() } else { self.model.unwrap().probe_profile_id(self.mode == "ecm_dtc") },"product":self.product,"chip_firmware":self.firmware,"voltage":self.voltage,
                             "vin":if self.read_vin {Some(&self.vin)} else {None},
+                            "vin_method":if !self.read_vin {"none"} else if self.t7_payload.is_some() {"trionic7_kwp_can_0x240"} else {"gmlan_isotp_7e0"},
                             "request_origin":self.origin, "firmware_emulation":false,
                             "flow_control_owner":if self.read_vin {"adapter"} else {"none"}}});
                     self.terminal = Some(result.clone());
@@ -660,6 +786,99 @@ mod tests {
                 usize::from(read_vin)
             );
         }
+    }
+    /// Trionic 7 replies (framing captured on a 2006 9-5; VIN serial is synthetic).
+    fn t7_reply(command: &str) -> String {
+        match command {
+            VIN_REQUEST => "NO DATA\r".into(),
+            T7_OPEN => "238 40 BF 21 C1 00 11 02 58\r".into(),
+            T7_VIN => "258 C3 BF 13 5A 90 59 53 33\r".into(),
+            "40A13F8300000000 1" => "258 82 BF 45 48 34 39 47 33\r".into(),
+            "40A13F8200000000 1" => "258 81 BF 36 33 30 30 30 30\r".into(),
+            "40A13F8100000000 1" => "258 80 BF 30 31 00 00 00 00\r".into(),
+            "40A13F8000000000" => "NO DATA\r".into(),
+            _ => reply(command),
+        }
+    }
+    fn run_t7(answer: impl Fn(&str) -> String) -> (Value, Vec<String>) {
+        let mut session = Session::new(true);
+        let mut event = session.event(&json!({"op":"start"}));
+        let mut sent = Vec::new();
+        while event["state"] == "send" {
+            let command = event["command"].as_str().unwrap().to_owned();
+            sent.push(command.clone());
+            event = feed(&mut session, &(answer(&command) + ">"));
+        }
+        (event, sent)
+    }
+    #[test]
+    fn trionic7_vin_fallback_after_gmlan_no_data() {
+        let (event, sent) = run_t7(t7_reply);
+        assert_eq!(event["state"], "complete", "{event}");
+        assert_eq!(event["result"]["vin"], "YS3EH49G363000001");
+        assert_eq!(event["result"]["vin_method"], "trionic7_kwp_can_0x240");
+        assert!(event["result"]["display"]
+            .as_str()
+            .unwrap()
+            .contains("Trionic 7"));
+        let start = sent.iter().position(|c| c == VIN_REQUEST).unwrap();
+        assert_eq!(
+            &sent[start..],
+            [
+                VIN_REQUEST,
+                "ATCFC0",
+                "ATCF218",
+                "ATCM79F",
+                "ATR1",
+                "ATST19",
+                "ATSH220",
+                "3F81001102400000 1",
+                "ATSH240",
+                "40A1021A90000000 1",
+                "ATSH266",
+                "40A13F8300000000 1",
+                "40A13F8200000000 1",
+                "40A13F8100000000 1",
+                "40A13F8000000000",
+                "VTPC"
+            ]
+        );
+        // Every frame sent to the vehicle is a T7 read, an acknowledgement or the
+        // original GMLAN VIN request; the GMLAN request is never repeated.
+        assert_eq!(sent.iter().filter(|c| *c == VIN_REQUEST).count(), 1);
+        assert!(sent.iter().all(|c| !vehicle_command(c)
+            || [VIN_REQUEST, T7_OPEN, T7_VIN].contains(&c.as_str())
+            || T7_ACKS.contains(&c.as_str())));
+    }
+    #[test]
+    fn trionic7_vin_fallback_fails_without_replay() {
+        // No session confirmation, a missing middle line, a negative reply, a bad VIN.
+        for (bad, text) in [
+            (T7_OPEN, "NO DATA\r"),
+            ("40A13F8200000000 1", "NO DATA\r"),
+            (T7_VIN, "258 C1 BF 03 7F 1A 31 00 00\r"),
+            ("40A13F8100000000 1", "258 80 BF 30 31 00 00 00 00\r258 80 BF 30 31 00 00 00 00\r"),
+        ] {
+            let (event, sent) = run_t7(|c| if c == bad { text.into() } else { t7_reply(c) });
+            assert_eq!(event["state"], "failed", "{bad}");
+            assert_eq!(sent.iter().filter(|c| *c == bad).count(), 1, "{bad} replayed");
+            assert_eq!(sent.iter().filter(|c| *c == T7_OPEN).count(), 1);
+        }
+        let wrong = |c: &str| {
+            if c == "40A13F8300000000 1" {
+                "258 82 BF 65 48 34 39 47 33\r".into()
+            } else {
+                t7_reply(c)
+            }
+        };
+        assert_eq!(run_t7(wrong).0["state"], "failed");
+    }
+    #[test]
+    fn gmlan_vin_success_never_starts_the_trionic7_read() {
+        let (event, sent) = run_t7(reply);
+        assert_eq!(event["state"], "complete");
+        assert_eq!(event["result"]["vin_method"], "gmlan_isotp_7e0");
+        assert!(!sent.iter().any(|c| c == T7_OPEN || c == T7_VIN));
     }
     #[test]
     fn strict_vin_and_negative_responses() {
