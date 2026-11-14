@@ -42,9 +42,13 @@ pub const BRIDGE_PORT: u16 = 35677;
 pub const READY: &str = "READY vlinker-native-read";
 const MONITOR: &str = "ATMA";
 /// ELM configuration after identity and voltage checks. No `ST` command is ever sent.
+/// Receive filter: Trionic 7 ECM replies only (0x238 session, 0x258 data; mask 0x79F
+/// also passes the unused 0x218/0x278). Accept-all monitoring of the P-bus (~200 frames/s
+/// on a 2006 9-5) overruns the Bluetooth link: after an interrupt the adapter kept
+/// flushing for more than 2 s, so the request could never be sent (vehicle trace).
 const SETUP: [&str; 14] = [
     "ATL0", "ATS1", "ATH1", "ATD1", "ATV1", "ATAL", "ATCAF0", "ATCFC0", "ATR0", "ATAT0", "ATST0A",
-    "ATSP6", "ATCM000", "ATCF000",
+    "ATSP6", "ATCF218", "ATCM79F",
 ];
 
 /// Raw HS-CAN data bytes for an ELM `ATSH`-addressed transmission.
@@ -261,7 +265,7 @@ impl Link {
             self.exact(cmd, "OK")?;
         }
         self.configured = true;
-        self.record(serde_json::json!({"setup_complete":true,"bus":"HS-CAN only","bitrate":500000,"raw_frames":true,"receive_filter":"all 11-bit","host_flow_control":false,"host_ISOTP_assembly":false,"sw_can":false}))
+        self.record(serde_json::json!({"setup_complete":true,"bus":"HS-CAN only","bitrate":500000,"raw_frames":true,"receive_filter":"T7 ECM replies 0x238/0x258 (ATCF218 ATCM79F)","host_flow_control":false,"host_ISOTP_assembly":false,"sw_can":false}))
     }
     fn receive(&mut self, events: &SyncSender<Event>) -> Result<(), String> {
         let monitoring = self.monitoring;
@@ -594,7 +598,16 @@ mod tests {
     fn setup_sends_no_stn_commands() {
         assert!(SETUP.iter().all(|c| c.starts_with("AT")));
         assert!(SETUP.contains(&"ATSP6") && SETUP.contains(&"ATCAF0") && SETUP.contains(&"ATR0"));
-        assert!(SETUP.contains(&"ATCM000") && SETUP.contains(&"ATCF000"));
+        assert!(SETUP.contains(&"ATCF218") && SETUP.contains(&"ATCM79F"));
+        // The filter passes both T7 reply IDs and none of the busy P-bus IDs seen on a 2006 9-5.
+        let passes = |id: u32| id & 0x79f == 0x218;
+        assert!(passes(0x238) && passes(0x258));
+        for id in [
+            0x110, 0x118, 0x120, 0x180, 0x1a0, 0x280, 0x290, 0x2f0, 0x300, 0x310, 0x358, 0x368,
+            0x370, 0x3a0, 0x3b0, 0x530, 0x5c0, 0x631, 0x6b1, 0x6b2, 0x7a0,
+        ] {
+            assert!(!passes(id), "{id:#x}");
+        }
     }
 }
 

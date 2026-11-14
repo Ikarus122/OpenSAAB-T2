@@ -241,7 +241,7 @@ fn hs_can_request_finishes_at_prompt_then_monitoring_receives_fragmented_t7_repl
         .collect();
     assert_eq!(&setup[..4], ["ATZ", "ATE0", "VTVERS", "ATRV"]);
     assert!(setup.iter().all(|c| !c.starts_with("ST")));
-    assert!(setup.contains(&"ATSP6") && setup.contains(&"ATCM000") && setup.contains(&"ATCF000"));
+    assert!(setup.contains(&"ATSP6") && setup.contains(&"ATCF218") && setup.contains(&"ATCM79F"));
     let sent = commands
         .iter()
         .position(|c| c == &format!("WRITE {REQUEST}"))
