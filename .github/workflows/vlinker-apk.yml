@@ -51,5 +51,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: opensaab-vlinker-debug-apk
-          path: target/android-tech2-app/opensaab-tech2.apk
+          path: target/android-tech2-app/OpenSAAB-T2-*-arm64-v8a.apk
           if-no-files-found: error
