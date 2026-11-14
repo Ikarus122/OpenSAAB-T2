@@ -513,7 +513,7 @@ impl Tech2Bus {
             if address < FLASH_SIZE {
                 self.eprom_program_sector_bytes[(address >> 16) as usize] += 2;
             }
-            if address >= 0x8018 {
+            if address >= 0x8018 && self.eprom_writes_apply() {
                 self.flash[address as usize] = high;
                 if (address as usize) + 1 < self.flash.len() {
                     self.flash[address as usize + 1] = low;
@@ -532,7 +532,7 @@ impl Tech2Bus {
                 // The boot block ends just before $8018.  The ROM explicitly
                 // selects its next update block at $8000, so preserve that
                 // boot area while erasing the requested 64 KiB block.
-                {
+                if self.eprom_writes_apply() {
                     let block_start = address & !0xFFFF;
                     let start = block_start.max(0x8018);
                     let end = (block_start + 0x1_0000).min(FLASH_SIZE);
@@ -566,6 +566,17 @@ impl Tech2Bus {
         } else {
             self.write_eprom_word(address & !1, value, value);
         }
+    }
+
+    /// Whether guest flash erase/program cycles change the modelled flash contents.
+    /// The research harness reflashes opsys.dwn to $08018..$40000 itself; at boot the
+    /// guest erases block 0 (and programs one word) before running from that block, so
+    /// applying the erase wiped the reflashed opsys and the guest stopped executing
+    /// erased flash (F-line trap at $0000d7f8). The research path therefore keeps the
+    /// repository-root behaviour: cycles are counted but only applied with
+    /// EPROM_WRITABLE. Fidelity boots still apply every cycle.
+    fn eprom_writes_apply(&self) -> bool {
+        !self.execution_mode.is_research_harness() || crate::options::env_flag("EPROM_WRITABLE")
     }
 
     pub fn new(flash: Vec<u8>, card: Vec<u8>, execution_mode: ExecutionMode) -> Self {
