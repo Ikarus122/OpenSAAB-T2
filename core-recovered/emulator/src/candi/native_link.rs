@@ -184,13 +184,13 @@ impl NativeLink {
         self.events.push("Android MX+ RFCOMM; original CANdi requests; serialized HS/SW; electrical ACK unverified".into());
         Ok(())
     }
-    /// vLinker MC+ HS-CAN preview: controller 0 only; the I-bus controller stays unattached.
+    /// vLinker MC+ preview: HS-CAN and single-wire data frames, serialized; no single-wire wake.
     pub fn attach_vlinker(&mut self, token: &str, directory: &Path) -> Result<(), String> {
         let bridge = tech2_emu::adapters::vlinker_guest::Bridge::start(token, directory)?;
-        self.machine.enable_can_transport(0)?;
+        for controller in [0,2] { self.machine.enable_can_transport(controller)?; }
         self.bridge = Some(Box::new(tech2_emu::can_adapter::TranslationBackend::new(Box::new(bridge))));
         self.live_clock = Some((std::time::Instant::now(), self.machine.elapsed_cycles()));
-        self.events.push("vLinker MC+ RFCOMM; original CANdi requests; HS-CAN only, no SW-CAN; electrical ACK unverified".into());
+        self.events.push("vLinker MC+ RFCOMM; original CANdi requests; serialized HS/SW data frames, no SW wake; electrical ACK unverified".into());
         Ok(())
     }
     pub fn enable_ignition_monitor(&mut self, directory: &Path) {

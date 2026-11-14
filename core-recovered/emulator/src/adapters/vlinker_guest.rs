@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: MPL-2.0
-//! Private owned vLinker MC+ (MIC3313, ELM327-compatible) native RFCOMM backend,
-//! HS-CAN (500 kbit/s, OBD pins 6/14) development preview for original-firmware reads.
+//! Private owned vLinker MC+ (MIC3313, ELM327-compatible) native RFCOMM backend for
+//! original-firmware reads: HS-CAN (controller 0, 500 kbit/s, OBD pins 6/14) and
+//! single-wire CAN data frames (controller 2, 33.3 kbit/s, OBD pin 1), serialized.
 //! Original CANdi owns all requests, padding, segmentation and flow control.
 //!
+//! The MIC3313 is a hybrid, checked on a vehicle: it accepts the STN bus configuration
+//! (`STP31`/`STP61`, `STPR`, `STPBRR`, `STCSWM2`/`STCSWM3`, `STFAC`, `STFPA`) but answers
+//! `?` to every form of `STPX`, so frames are sent ELM-style (`ATSH` + data bytes).
+//!
 //! Scope limits, stated rather than hidden:
-//! - Controller 0 (HS-CAN / Saab P-bus) only. Single-wire CAN (controller 2, I-bus) and
-//!   its high-voltage wake are rejected: no `VT` equivalent of `STPBRR 33333`/`STCSWM2`
-//!   has been qualified on a MIC3313.
-//! - Plain ELM commands are used (`ATSH`, raw data, `ATMA`); the MIC takes longer than an
-//!   STN to switch headers, which the original CANdi tolerates as a late/missing reply.
+//! - The single-wire high-voltage wake (zero-DLC 0x100) is rejected: ELM raw mode cannot
+//!   send a frame without data and `STPX` is unavailable. A session that needs the wake
+//!   fails explicitly instead of pretending it was sent.
+//! - Zero-length frames the adapter prints as `<id> RTR` (0x100 on a 2006 9-5 I-bus) are
+//!   recorded in the trace but not delivered to the guest.
 //! - Completion is a Bluetooth write indication, never evidence of an electrical CAN ACK.
 use crate::{
     adapters::{
@@ -40,7 +45,28 @@ use std::{
 /// Local byte-bridge port; the MX+ bridge owns 35676.
 pub const BRIDGE_PORT: u16 = 35677;
 pub const READY: &str = "READY vlinker-native-read";
-const MONITOR: &str = "ATMA";
+/// HS-CAN monitoring (vehicle-checked); single-wire monitoring uses `STM` (vehicle-checked).
+const MONITOR_HS: &str = "ATMA";
+const MONITOR_SW: &str = "STM";
+/// Return to HS-CAN from single-wire: reopen ISO 15765 500k and reapply the T7 filter
+/// (`STFAC` on the single-wire side cleared it).
+const SELECT_HS: [(&str, &str); 4] = [
+    ("STPC", "OK"),
+    ("ATSP6", "OK"),
+    ("ATCF218", "OK"),
+    ("ATCM79F", "OK"),
+];
+/// Single-wire CAN 33.3k, normal (non-wake) mode, accept-all filter. Every command and
+/// readback was answered exactly like this by a vLinker MC+ (MIC3313 V2.0.92).
+const SELECT_SW: [(&str, &str); 7] = [
+    ("STPC", "OK"),
+    ("STP61", "OK"),
+    ("STPR", "61"),
+    ("STPBRR", "33333"),
+    ("STCSWM3", "OK"),
+    ("STFAC", "OK"),
+    ("STFPA000,000", "OK"),
+];
 /// ELM configuration after identity and voltage checks. No `ST` command is ever sent.
 /// Receive filter: Trionic 7 ECM replies only (0x238 session, 0x258 data; mask 0x79F
 /// also passes the unused 0x218/0x278). Accept-all monitoring of the P-bus (~200 frames/s
@@ -54,11 +80,17 @@ const SETUP: [&str; 14] = [
     "ATSP6", "ATCF218", "ATCM79F",
 ];
 
-/// Raw HS-CAN data bytes for an ELM `ATSH`-addressed transmission.
+/// Raw data bytes for an ELM `ATSH`-addressed transmission on HS-CAN or single-wire CAN.
 fn encode(controller: usize, tx: &CanTransmission) -> Result<String, String> {
     let route = electrical_route(controller, tx)?;
-    if controller != 0 || route.mode != ElectricalMode::Data {
-        return Err("vLinker HS-CAN preview: single-wire CAN and wake are not implemented".into());
+    if route.mode == ElectricalMode::SingleWireWake {
+        return Err(
+            "vLinker: single-wire wake not implemented (zero-DLC frame; the MIC3313 has no STPX)"
+                .into(),
+        );
+    }
+    if ![0, 2].contains(&controller) {
+        return Err("vLinker controller unavailable".into());
     }
     if tx.frame.dlc == 0 {
         return Err("ELM raw mode cannot send a zero-DLC frame".into());
@@ -75,6 +107,7 @@ struct Link {
     synchronized: bool,
     configured: bool,
     monitoring: bool,
+    controller: usize,
     firmware: String,
     active_tx: Option<FailureContext>,
 }
@@ -118,6 +151,7 @@ impl Link {
             synchronized: true,
             configured: false,
             monitoring: false,
+            controller: 0,
             firmware: String::new(),
             active_tx: None,
         })
@@ -151,7 +185,7 @@ impl Link {
             return Err("Native RFCOMM write failed".into());
         }
         self.receiving = true;
-        self.monitoring = cmd == MONITOR;
+        self.monitoring = cmd == MONITOR_HS || cmd == MONITOR_SW;
         Ok(())
     }
     fn packet(&mut self) -> Result<Vec<Item>, String> {
@@ -268,19 +302,53 @@ impl Link {
             self.exact(cmd, "OK")?;
         }
         self.configured = true;
-        self.record(serde_json::json!({"setup_complete":true,"bus":"HS-CAN only","bitrate":500000,"raw_frames":true,"receive_filter":"T7 ECM replies 0x238/0x258 (ATCF218 ATCM79F)","host_flow_control":false,"host_ISOTP_assembly":false,"sw_can":false}))
+        self.record(serde_json::json!({"setup_complete":true,"bus":"HS-CAN first; SW-CAN 33.3k data frames on demand, no wake","bitrate":500000,"raw_frames":true,"receive_filter":"T7 ECM replies 0x238/0x258 (ATCF218 ATCM79F)","host_flow_control":false,"host_ISOTP_assembly":false,"sw_can":"data frames only"}))
+    }
+    fn select_bus(&mut self, controller: usize) -> Result<(), String> {
+        if controller == self.controller {
+            return Ok(());
+        }
+        let steps: &[(&str, &str)] = if controller == 2 {
+            &SELECT_SW
+        } else {
+            &SELECT_HS
+        };
+        for (cmd, expected) in steps {
+            self.exact(cmd, expected)?;
+        }
+        self.controller = controller;
+        self.record(serde_json::json!({"selected_controller":controller,"bus":if controller==0 {"HS-CAN"} else {"SW-CAN 33.3k"},"simultaneous_buses":false}))
+    }
+    fn monitor_command(&self) -> &'static str {
+        if self.controller == 2 {
+            MONITOR_SW
+        } else {
+            MONITOR_HS
+        }
     }
     fn receive(&mut self, events: &SyncSender<Event>) -> Result<(), String> {
         let monitoring = self.monitoring;
         for item in self.packet()? {
             if let Item::Line(line) = item {
+                let fields: Vec<_> = line.split_whitespace().collect();
+                if fields.len() >= 2
+                    && fields[0].len() == 3
+                    && fields[0].bytes().all(|b| b.is_ascii_hexdigit())
+                    && fields.contains(&"RTR")
+                {
+                    self.record(serde_json::json!({"zero_length_frame_not_delivered":{"line":line,"controller":self.controller}}))?;
+                    continue;
+                }
                 if let Some(f) = frame(&line)? {
                     self.record(
                         serde_json::json!({"received_frame":{"id":f.id,"dlc":f.dlc,"data":f.data}}),
                     )?;
-                    events.try_send(Event::Received(0, f)).map_err(|_| {
-                        "ELM receive queue full; session failed rather than discarding".to_string()
-                    })?;
+                    events
+                        .try_send(Event::Received(self.controller, f))
+                        .map_err(|_| {
+                            "ELM receive queue full; session failed rather than discarding"
+                                .to_string()
+                        })?;
                 } else if line.trim() == "STOPPED" && !monitoring {
                     return Err("ELM ordinary CAN request was unexpectedly interrupted".into());
                 } else if !matches!(line.trim(), "" | "OK" | "STOPPED" | "NO DATA") {
@@ -316,7 +384,7 @@ impl Link {
         if !self.monitoring {
             return Err("Refused implicit interruption of an ordinary CAN request".into());
         }
-        self.record(serde_json::json!({"monitor_interrupt":{"reason":reason,"controller":0},"ordinary_CAN_request_interrupted":false}))?;
+        self.record(serde_json::json!({"monitor_interrupt":{"reason":reason,"controller":self.controller},"ordinary_CAN_request_interrupted":false}))?;
         if self.socket("INTERRUPT")? != "WRITTEN" {
             return Err("ELM interrupt failed".into());
         }
@@ -401,6 +469,7 @@ impl Bridge {
                             phase: "bus-setup",
                         });
                         let data = encode(controller, &tx)?;
+                        link.select_bus(controller)?;
                         // ELM reopens the protocol on the next transmission; the header is
                         // set explicitly every time because cached state cannot survive cancellation.
                         link.exact(&format!("ATSH{:03X}", tx.frame.id), "OK")?;
@@ -418,7 +487,8 @@ impl Bridge {
                             .map_err(|_| "ELM event queue full".to_string())?;
                         link.active_tx = None;
                     } else if !link.receiving {
-                        link.send(MONITOR)?;
+                        let monitor = link.monitor_command();
+                        link.send(monitor)?;
                     } else {
                         link.receive(&events)?;
                     }
@@ -443,8 +513,8 @@ impl Bridge {
             stop,
             worker: Some(worker),
             gate: CommandGate::default(),
-            // The captured key-status DeviceControl lives on the I-bus, which this
-            // preview does not reach; no DeviceControl is accepted here.
+            // The captured key-status DeviceControl (I-bus 0x241) stays disabled until it
+            // is exercised on a vehicle through this adapter; only read services pass.
             key_status: KeyStatusGate {
                 enabled: false,
                 sent: 0,
@@ -506,7 +576,39 @@ mod tests {
     use super::*;
     use crate::candi_cpu::{CanElectricalState, CanFrame};
     #[test]
-    fn encodes_exact_hs_can_bytes_and_rejects_sw_can_and_empty_frames() {
+    fn encodes_single_wire_data_frames_with_their_exact_bytes() {
+        let tx = CanTransmission {
+            frame: CanFrame {
+                id: 0x241,
+                extended: false,
+                rtr: false,
+                dlc: 8,
+                data: vec![2, 0x1a, 0x90, 0, 0, 0, 0, 0],
+            },
+            ticket: 1,
+            btr0: 0xdd,
+            btr1: 0x36,
+            electrical: CanElectricalState::SingleWireGpio {
+                latch: 3,
+                assignment: 0,
+                direction: 3,
+            },
+        };
+        assert_eq!(encode(2, &tx).unwrap(), "021A900000000000");
+        // Single-wire timing on the HS-CAN controller is an electrical mismatch.
+        assert!(encode(0, &tx).is_err());
+        assert!(SELECT_SW.iter().any(|s| *s == ("STPBRR", "33333")));
+        assert!(SELECT_SW.iter().any(|s| *s == ("STCSWM3", "OK")));
+        assert!(!SELECT_SW
+            .iter()
+            .any(|s| s.0.starts_with("STPX") || s.0 == "STCSWM2"));
+        assert!(
+            SELECT_HS.iter().any(|s| s.0 == "ATCF218")
+                && SELECT_HS.iter().any(|s| s.0 == "ATCM79F")
+        );
+    }
+    #[test]
+    fn encodes_exact_hs_can_bytes_and_rejects_wake_and_empty_frames() {
         let mut tx = CanTransmission {
             frame: CanFrame {
                 id: 0x240,
@@ -528,7 +630,7 @@ mod tests {
         tx.frame.dlc = 0;
         tx.frame.data.clear();
         assert!(encode(0, &tx).is_err());
-        // The SW-CAN wake route is valid for the MX+ but explicitly unsupported here.
+        // The SW-CAN wake route is valid for the MX+ but has no ELM transmission here.
         tx.frame.id = 0x100;
         tx.btr0 = 0xdd;
         tx.electrical = CanElectricalState::SingleWireGpio {
@@ -536,7 +638,7 @@ mod tests {
             assignment: 0,
             direction: 3,
         };
-        assert!(encode(2, &tx).unwrap_err().contains("not implemented"));
+        assert!(encode(2, &tx).unwrap_err().contains("wake not implemented"));
     }
     #[test]
     fn trionic7_read_policy_admits_captured_reads_and_rejects_writes() {

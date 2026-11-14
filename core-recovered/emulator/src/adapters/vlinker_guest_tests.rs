@@ -20,6 +20,7 @@ enum Mode {
 }
 
 const REQUEST: &str = "40A1021A97000000";
+const REQUEST_SW: &str = "021A900000000000";
 
 struct Peer {
     directory: std::path::PathBuf,
@@ -53,6 +54,7 @@ impl Peer {
             let mut monitor = false;
             let mut ordinary_reads = 0;
             let mut requests = 0;
+            let mut single_wire = false;
             loop {
                 let mut line = String::new();
                 let Ok(n) = reader.read_line(&mut line) else {
@@ -67,10 +69,34 @@ impl Peer {
                     READY.to_string()
                 } else if let Some(c) = command.strip_prefix("WRITE ") {
                     assert!(!ordinary, "A new write raced an ordinary request");
-                    assert!(!c.starts_with("ST"), "STN command sent to a MIC3313: {c}");
-                    if c == "ATMA" {
+                    // Only the STN configuration a vLinker MC+ answered on the car; never STPX.
+                    assert!(
+                        !c.starts_with("ST")
+                            || [
+                                "STPC",
+                                "STP61",
+                                "STPR",
+                                "STPBRR",
+                                "STCSWM3",
+                                "STFAC",
+                                "STFPA000,000",
+                                "STM"
+                            ]
+                            .contains(&c),
+                        "Unqualified STN command sent to a MIC3313: {c}"
+                    );
+                    if c == "STP61" {
+                        single_wire = true;
+                    } else if c == "ATSP6" {
+                        single_wire = false;
+                    }
+                    if c == "ATMA" || c == "STM" {
                         monitor = true;
-                    } else if c == REQUEST {
+                        if c == "STM" {
+                            // Captured on a 2006 9-5 single-wire I-bus.
+                            replies.push_back(b"100 RTR\r".to_vec());
+                        }
+                    } else if c == REQUEST || c == REQUEST_SW {
                         ordinary = true;
                         ordinary_reads = 0;
                         requests += 1;
@@ -92,6 +118,8 @@ impl Peer {
                                 }
                             }
                             "ATCS" => "T:00 R:00 F:00",
+                            "STPR" => "61",
+                            "STPBRR" => "33333",
                             _ => "OK",
                         };
                         replies.push_back(format!("{value}\r\r>").into_bytes());
@@ -105,12 +133,13 @@ impl Peer {
                         ordinary_reads += 1;
                         // ATR1: the reply (captured on a 2006 9-5 T7) arrives fragmented
                         // before the prompt that ends the ordinary request.
-                        let bytes = if requests == 1 {
+                        let bytes = if requests == 1 || matches!(mode, Mode::Success) {
                             match mode {
                                 Mode::MissingPrompt => Vec::new(),
                                 Mode::CanError => b"CAN ERROR\r\r>".to_vec(),
                                 Mode::BufferFull => b"BUFFER FULL\r\r>".to_vec(),
                                 Mode::Stopped => b"STOPPED\r\r>".to_vec(),
+                                _ if single_wire => b"541 8 06 5A 90 59 53 33 45 00\r\r>".to_vec(),
                                 _ => match ordinary_reads {
                                     1 => b"258 8 C5 BF 20 5A 97".to_vec(),
                                     _ => b" 39 2D 35\r\r>".to_vec(),
@@ -263,19 +292,102 @@ fn hs_can_request_delivers_fragmented_t7_reply_before_completion() {
     assert_eq!(commands.last().unwrap(), "CLOSE");
 }
 
+fn sw_read(ticket: u64) -> CanTransmission {
+    let mut t = tx(2, ticket);
+    t.frame.id = 0x241;
+    t.frame.data = vec![2, 0x1a, 0x90, 0, 0, 0, 0, 0];
+    t
+}
+
+fn single_wire_read_then_back_to_hs_can() {
+    let (peer, link) = Peer::open(Mode::Success);
+    let mut backend =
+        crate::can_adapter::TranslationBackend::new(Box::new(Bridge::from_link(link)));
+    backend.transmit(2, sw_read(41)).unwrap();
+    let (mut events, error) = run(&mut backend, |e| {
+        e.iter().any(|e| matches!(e, Event::Completed { .. }))
+    });
+    assert_eq!(error, None);
+    // Let single-wire monitoring run (and see its 0x100 RTR line) before the HS request.
+    thread::sleep(Duration::from_millis(150));
+    backend.transmit(0, tx(0, 42)).unwrap();
+    let (more, error) = run(&mut backend, |e| {
+        e.iter().any(|e| matches!(e, Event::Completed { .. }))
+    });
+    assert_eq!(error, None);
+    events.extend(more);
+    let order: Vec<_> = events
+        .iter()
+        .map(|e| match e {
+            Event::Received(c, f) => format!("rx{c}:{:03X}", f.id),
+            Event::Completed {
+                controller, ticket, ..
+            } => format!("done{controller}:{ticket}"),
+        })
+        .collect();
+    assert_eq!(order, ["rx2:541", "done2:41", "rx0:258", "done0:42"]);
+    assert!(
+        matches!(&events[0], Event::Received(2, f) if f.data == [6, 0x5a, 0x90, 0x59, 0x53, 0x33, 0x45, 0])
+    );
+    backend.close();
+    let commands = peer.close();
+    let writes: Vec<_> = commands
+        .iter()
+        .filter_map(|c| c.strip_prefix("WRITE "))
+        .collect();
+    let sw = writes.iter().position(|c| *c == "STP61").unwrap();
+    assert_eq!(
+        &writes[sw - 1..sw + 8],
+        [
+            "STPC",
+            "STP61",
+            "STPR",
+            "STPBRR",
+            "STCSWM3",
+            "STFAC",
+            "STFPA000,000",
+            "ATSH241",
+            REQUEST_SW
+        ]
+    );
+    let hs = writes.iter().position(|c| *c == REQUEST).unwrap();
+    assert_eq!(
+        &writes[hs - 5..hs],
+        ["STPC", "ATSP6", "ATCF218", "ATCM79F", "ATSH240"]
+    );
+    // Single-wire monitoring ran, and its zero-length 0x100 line was not delivered.
+    assert!(writes[sw..hs].contains(&"STM"));
+    assert!(!writes
+        .iter()
+        .any(|c| c.starts_with("STPX") || *c == "STCSWM2"));
+}
 #[test]
-fn sw_can_controller_is_rejected_before_any_write() {
+fn single_wire_read_selects_33k_then_returns_to_hs_can_filter() {
+    single_wire_read_then_back_to_hs_can();
+}
+
+#[test]
+fn single_wire_wake_is_rejected_before_any_write() {
     let (peer, link) = Peer::open(Mode::Success);
     let mut backend = Bridge::from_link(link);
+    let mut wake = tx(2, 40);
+    wake.frame.id = 0x100;
+    wake.frame.dlc = 0;
+    wake.frame.data.clear();
+    wake.electrical = crate::candi_cpu::CanElectricalState::SingleWireGpio {
+        latch: 2,
+        assignment: 0,
+        direction: 3,
+    };
     assert!(backend
-        .transmit(2, tx(2, 41))
+        .transmit(2, wake)
         .unwrap_err()
-        .contains("not implemented"));
+        .contains("wake not implemented"));
     backend.close();
     let commands = peer.close();
     assert!(!commands
         .iter()
-        .any(|c| c.starts_with("WRITE ATSH") || c.contains("STCSWM") || c.contains("STPBRR")));
+        .any(|c| c.starts_with("WRITE ATSH") || c.contains("STP61") || c.contains("STPX")));
 }
 
 fn failure_case(mode: Mode, expected: &str) {

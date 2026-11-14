@@ -258,7 +258,7 @@ public final class MainActivity extends Activity {
         if(com.opensaab.usb.SetupCleanup.available(this))menu.add("Remove installer",()->{if(idleTool())com.opensaab.usb.SetupCleanup.remove(this);});
         menu.add("AI control (MCP)",()->com.opensaab.usb.AndroidMcp.show(this));
         menu.add("MX+ firmware session",this::startMx);
-        menu.add("vLinker MC+ firmware session (HS-CAN only)",this::startVlinkerFirmware);
+        menu.add("vLinker MC+ firmware session (HS-CAN + SW-CAN, no wake)",this::startVlinkerFirmware);
         menu.add("Run without an adapter",()->{if(idleTool()){mxDevice=null;startSession();}});
         menu.add("Firmware selection",()->{if(idleTool())startActivity(new android.content.Intent(this,com.opensaab.usb.FirmwareActivity.class));})
             .add("Preferences",controls::showPreferences)
@@ -410,7 +410,7 @@ public final class MainActivity extends Activity {
         if(com.opensaab.usb.DemandStartup.enabled(this)){startup=new com.opensaab.usb.StartupMeasurement(this,autoStarted?android.os.SystemClock.elapsedRealtime():launchOrigin);autoStarted=true;}
         offlineBackgroundStop=null;running=true; stopping.set(false); logs.setLength(0);consoleDirty=true;
         start.setEnabled(false); lcd.frame=null; lcd.invalidate();
-        status.setText(mxDevice==null?"Emulation mode • Offline • No vehicle connection":liveVlinker?"vLinker HS-CAN read session • Starting original firmware":"MX+ read session • Starting original firmware");
+        status.setText(mxDevice==null?"Emulation mode • Offline • No vehicle connection":liveVlinker?"vLinker read session • Starting original firmware":"MX+ read session • Starting original firmware");
         new Thread(()->runSession(firmware),"tech2-session").start();
     }
     private volatile Boolean offlineBackgroundStop;

@@ -12,7 +12,8 @@ import org.json.JSONObject;
 
 /**
  * App-owned, authenticated loopback byte effects for the shared vLinker MC+ (MIC3313) /
- * CANdi worker (Rust adapters/vlinker_guest.rs). HS-CAN only; the worker owns all ELM
+ * CANdi worker (Rust adapters/vlinker_guest.rs). HS-CAN and single-wire data frames,
+ * no single-wire wake; the worker owns all ELM
  * commands, identity checks and request policy. Same byte protocol as MxNativeBridge,
  * on its own port so the two owners can never be confused.
  */
