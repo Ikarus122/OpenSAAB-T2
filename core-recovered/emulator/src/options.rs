@@ -470,7 +470,9 @@ impl Options {
         if out.strict && out.research {
             return Err("--strict cannot be combined with research mode".into());
         }
+        // The vLinker session is itself validated above to be native-manual interactive.
         if target_set && !out.test_harness && out.candi_chipsoft_port.is_none()
+            && out.candi_vlinker_token.is_none()
             && !(out.interactive_headless && interactive_local_j2534) {
             return Err("--harness-target requires --test-harness".into());
         }
