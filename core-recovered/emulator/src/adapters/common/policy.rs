@@ -43,6 +43,9 @@ pub fn allowed_for_profile(controller: usize, tx: &CanTransmission, profile: Pro
     if route.mode == ElectricalMode::SingleWireWake {
         return controller == 2 && id == 0x100 && data.is_empty();
     }
+    if controller == 0 && profile == Profile::Read && trionic7_read(id, data) {
+        return true;
+    }
     if data.is_empty()
         || !(id == 0x101
             || id == 0x7e0
@@ -103,6 +106,36 @@ pub fn allowed_for_profile(controller: usize, tx: &CanTransmission, profile: Pro
                 && id == 0x7e0
                 && (*rate == 0 || !dpids.is_empty())
                 && dpids.iter().all(|d| matches!(d, 1..=0x7f | 0x90..=0xfe))
+        }
+        _ => false,
+    }
+}
+
+/// Trionic 7 (Saab 9-5 OG / 9-3 OG, HS-CAN P-bus) KWP2000-over-CAN read subset.
+/// Framing differs from GMLAN ISO-TP: tester 0x220 opens the session, 0x240 carries
+/// `[seq, target 0xA1, length, service, ...]`, and each ECM reply line on 0x258 is
+/// acknowledged on 0x266. Only identification, data/DTC reads, session keep-alive and
+/// session stop are admitted; no write, clear, routine, security or download service.
+/// Captured on a 2006 9-5 T7 (`EU0DF24C.55P`) through a vLinker MC+.
+pub fn trionic7_read(id: u32, data: &[u8]) -> bool {
+    if data.len() != 8 {
+        return false;
+    }
+    match id {
+        // StartCommunication to the ECM; parameters stay guest-owned.
+        0x220 => data[0] == 0x3f && data[1] == 0x81,
+        // Acknowledge one received reply line (sequence bit 6 cleared).
+        0x266 => data[..3] == [0x40, 0xa1, 0x3f] && data[3] & 0xc0 == 0x80 && data[4..] == [0, 0, 0, 0],
+        // Single-frame request: 0x40 = first and only line, 0xA1 = ECM, then KWP length.
+        0x240 if data[0] == 0x40 && data[1] == 0xa1 => {
+            let n = usize::from(data[2]);
+            if !(1..=5).contains(&n) {
+                return false;
+            }
+            matches!(
+                &data[3..3 + n],
+                [0x1a, _] | [0x21, _] | [0x18, _, _, _] | [0x3e] | [0x82] | [0x20] | [0x10, 0x80 | 0x81]
+            ) && data[3 + n..].iter().all(|b| *b == 0)
         }
         _ => false,
     }

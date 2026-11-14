@@ -898,6 +898,10 @@ fn run(attempt: u64, retained: &mut Option<(tech2_emu::capture::CaptureStorage, 
         bus.candi_link.as_mut().ok_or_else(|| (2,"Missing native CANdi".into()))?
             .attach_obdlink(token,&opts.output).map_err(|e| (2,e))?;
     }
+    if let Some(token) = &opts.candi_vlinker_token {
+        bus.candi_link.as_mut().ok_or_else(|| (2,"Missing native CANdi".into()))?
+            .attach_vlinker(token,&opts.output).map_err(|e| (2,e))?;
+    }
     if let Some(port) = &opts.candi_chipsoft_port {
         bus.candi_link.as_mut().ok_or_else(|| (2, "Missing native CANdi".into()))?
             .attach_chipsoft_serial(port, &opts.output, opts.candi_chipsoft_seeds).map_err(|e| (2, e))?;
@@ -1041,7 +1045,7 @@ fn run(attempt: u64, retained: &mut Option<(tech2_emu::capture::CaptureStorage, 
             limit_insns: limit,
             sample_hotspots: !opts.interactive_headless,
             interactive: opts.interactive_headless,
-            android_live: opts.candi_obdlink_token.is_some() || (opts.interactive_headless && opts.candi_nano_ssh.as_deref() == Some("local"))
+            android_live: opts.candi_obdlink_token.is_some() || opts.candi_vlinker_token.is_some() || (opts.interactive_headless && opts.candi_nano_ssh.as_deref() == Some("local"))
                 || opts.candi_chipsoft_port.is_some() || opts.candi_nano_usb_token.is_some()
                 || opts.candi_chipsoft_usb_token.is_some()
                 || options::env_flag("TECH2_ANDROID_LIVE"),

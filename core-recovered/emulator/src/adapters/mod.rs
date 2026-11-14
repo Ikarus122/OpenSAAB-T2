@@ -9,4 +9,5 @@ pub mod vcx_nano;
 pub mod vlinker;
 
 pub mod obdlink_guest;
+pub mod vlinker_guest;
 mod stn_parser;
