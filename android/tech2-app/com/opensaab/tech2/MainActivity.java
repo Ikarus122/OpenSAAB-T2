@@ -37,6 +37,8 @@ public final class MainActivity extends Activity {
     private android.bluetooth.BluetoothDevice mxDevice;
     private boolean mxCompatibility;
     private volatile com.opensaab.usb.MxNativeBridge mxBridge;
+    private volatile com.opensaab.usb.VlinkerNativeBridge vlinkerBridge;
+    private boolean liveVlinker;
     private long sessionStarted,beatStamp,beatObserved;
     private final com.opensaab.usb.AndroidMcp.Owner mcpOwner=new com.opensaab.usb.AndroidMcp.Owner(){
         public org.json.JSONObject state()throws Exception{return mcpState();}
@@ -45,7 +47,7 @@ public final class MainActivity extends Activity {
         public void stop(){stopSession("Stopped by AI control");}
     };
     private org.json.JSONObject mcpState()throws Exception {
-        org.json.JSONObject j=new org.json.JSONObject().put("session",running&&session!=null?session.getName():"").put("session_running",running).put("emulator_alive",process!=null&&process.isAlive()).put("busy",(simulatorConnection!=null&&simulatorConnection.busy)||(hscanProbe!=null&&hscanProbe.busy)||com.opensaab.usb.FirmwareGate.busy()||com.opensaab.usb.SecurityAccessView.workflowBusy()).put("mode",mxDevice==null?"offline":"mxp_read").put("input_idle",keyPump!=null&&keyPump.idle()).put("session_age_ms",running?android.os.SystemClock.elapsedRealtime()-sessionStarted:0);
+        org.json.JSONObject j=new org.json.JSONObject().put("session",running&&session!=null?session.getName():"").put("session_running",running).put("emulator_alive",process!=null&&process.isAlive()).put("busy",(simulatorConnection!=null&&simulatorConnection.busy)||(hscanProbe!=null&&hscanProbe.busy)||com.opensaab.usb.FirmwareGate.busy()||com.opensaab.usb.SecurityAccessView.workflowBusy()).put("mode",mxDevice==null?"offline":liveVlinker?"vlinker_read":"mxp_read").put("input_idle",keyPump!=null&&keyPump.idle()).put("session_age_ms",running?android.os.SystemClock.elapsedRealtime()-sessionStarted:0);
         if(running&&session!=null){
             File beat=new File(session,"emulator-heartbeat");if(beat.lastModified()!=beatStamp){beatStamp=beat.lastModified();beatObserved=android.os.SystemClock.elapsedRealtime();}
             j.put("emulator_heartbeat_age_ms",beatStamp==0?org.json.JSONObject.NULL:android.os.SystemClock.elapsedRealtime()-beatObserved);
@@ -54,7 +56,9 @@ public final class MainActivity extends Activity {
         }
         return j;
     }
-    private void startMx(){if(!idleTool())return;selectVlinker((device,compatibility)->{try{if(device.getName()==null||!device.getName().startsWith("OBDLink MX")){status.setText("Select the OBDLink MX+ for original firmware diagnostics");return;}mxDevice=device;mxCompatibility=compatibility;startSession();}catch(SecurityException denied){status.setText("Allow Nearby devices before connecting MX+");}});}
+    private void startMx(){if(!idleTool())return;selectVlinker((device,compatibility)->{try{if(device.getName()==null||!device.getName().startsWith("OBDLink MX")){status.setText("Select the OBDLink MX+ for original firmware diagnostics");return;}mxDevice=device;mxCompatibility=compatibility;liveVlinker=false;startSession();}catch(SecurityException denied){status.setText("Allow Nearby devices before connecting MX+");}});}
+    /** vLinker MC+ original-firmware read session: HS-CAN (P-bus) only, e.g. Trionic 7 on a 9-5 MY2006+. */
+    private void startVlinkerFirmware(){if(!idleTool())return;selectVlinker((device,compatibility)->{try{if(!com.opensaab.usb.VlinkerNativeBridge.supported(device)){status.setText("Select the vLinker MC+ (vLinker MC-Android) for this session");return;}mxDevice=device;mxCompatibility=compatibility;liveVlinker=true;startSession();}catch(SecurityException denied){status.setText("Allow Nearby devices before connecting vLinker");}});}
 
     private TextView status, console;
     private TextView vehicleSummary,connectionDate,authStatus,authDate;
@@ -254,6 +258,7 @@ public final class MainActivity extends Activity {
         if(com.opensaab.usb.SetupCleanup.available(this))menu.add("Remove installer",()->{if(idleTool())com.opensaab.usb.SetupCleanup.remove(this);});
         menu.add("AI control (MCP)",()->com.opensaab.usb.AndroidMcp.show(this));
         menu.add("MX+ firmware session",this::startMx);
+        menu.add("vLinker MC+ firmware session (HS-CAN only)",this::startVlinkerFirmware);
         menu.add("Run without an adapter",()->{if(idleTool()){mxDevice=null;startSession();}});
         menu.add("Firmware selection",()->{if(idleTool())startActivity(new android.content.Intent(this,com.opensaab.usb.FirmwareActivity.class));})
             .add("Preferences",controls::showPreferences)
@@ -405,7 +410,7 @@ public final class MainActivity extends Activity {
         if(com.opensaab.usb.DemandStartup.enabled(this)){startup=new com.opensaab.usb.StartupMeasurement(this,autoStarted?android.os.SystemClock.elapsedRealtime():launchOrigin);autoStarted=true;}
         offlineBackgroundStop=null;running=true; stopping.set(false); logs.setLength(0);consoleDirty=true;
         start.setEnabled(false); lcd.frame=null; lcd.invalidate();
-        status.setText(mxDevice==null?"Emulation mode • Offline • No vehicle connection":"MX+ read session • Starting original firmware");
+        status.setText(mxDevice==null?"Emulation mode • Offline • No vehicle connection":liveVlinker?"vLinker HS-CAN read session • Starting original firmware":"MX+ read session • Starting original firmware");
         new Thread(()->runSession(firmware),"tech2-session").start();
     }
     private volatile Boolean offlineBackgroundStop;
@@ -422,7 +427,7 @@ public final class MainActivity extends Activity {
                 for(int i=0;i<old.length-2;i++) remove(old[i]); }
             session=new File(runs,UUID.randomUUID().toString());
             if(!session.mkdir()) throw new IOException("Cannot create session directory");
-            offlineEvidence.begin(session,new File(getApplicationInfo().nativeLibraryDir,"libtech2_recovered.so"),firmware,mxDevice==null?"offline_native":"mxp_research");
+            offlineEvidence.begin(session,new File(getApplicationInfo().nativeLibraryDir,"libtech2_recovered.so"),firmware,mxDevice==null?"offline_native":liveVlinker?"vlinker_research":"mxp_research");
             sessionStarted=android.os.SystemClock.elapsedRealtime();beatStamp=beatObserved=0;
             if(offlineBackgroundStop!=null)offlineEvidence.requestStop(offlineBackgroundStop);
             List<String> args=new ArrayList<>(Arrays.asList(
@@ -439,7 +444,9 @@ public final class MainActivity extends Activity {
                 args.add(args.size()-1,"--research-harness");args.add(args.size()-1,"--candi-native-link");
                 args.add(args.size()-1,"--candi-firmware");args.add(args.size()-1,new File(firmware,"candi.bin").toString());
                 args.add(args.size()-1,"--opsys");args.add(args.size()-1,new File(firmware,"opsys.dwn").toString());
-                mxBridge=new com.opensaab.usb.MxNativeBridge(this,mxDevice,mxCompatibility);args.add(args.size()-1,"--candi-obdlink-token");args.add(args.size()-1,mxBridge.token());args.add(args.size()-1,"--harness-target");args.add(args.size()-1,"native-manual");
+                if(liveVlinker){vlinkerBridge=new com.opensaab.usb.VlinkerNativeBridge(this,mxDevice,mxCompatibility);args.add(args.size()-1,"--candi-vlinker-token");args.add(args.size()-1,vlinkerBridge.token());}
+                else{mxBridge=new com.opensaab.usb.MxNativeBridge(this,mxDevice,mxCompatibility);args.add(args.size()-1,"--candi-obdlink-token");args.add(args.size()-1,mxBridge.token());}
+                args.add(args.size()-1,"--harness-target");args.add(args.size()-1,"native-manual");
             }
             ProcessBuilder builder=new ProcessBuilder(args).directory(session).redirectErrorStream(true);
             com.opensaab.usb.DemandStartup.configure(this,builder);
@@ -477,6 +484,7 @@ public final class MainActivity extends Activity {
             if(exitCode==null&&child!=null&&!child.isAlive())exitCode=child.exitValue();
             offlineEvidence.ended(exitCode,hostDeadline,forced,launchFailed);
             if(mxBridge!=null){mxBridge.close();mxBridge=null;}
+            if(vlinkerBridge!=null){vlinkerBridge.close();vlinkerBridge=null;}
             process=null;
             if(stopping.get()||completed)health.expectedStop();else health.ended();
             if(firmwareLease!=null)firmwareLease.close();
