@@ -1,0 +1,47 @@
+# Personal fork build: firmware-free debug APK for testing the vLinker branch.
+# Not part of the upstream pull request.
+name: vLinker debug APK
+on:
+  push:
+    branches: [apk-ci]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Rust toolchain and Android target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-linux-android
+      - name: Android SDK 36, build-tools 36.0.0, NDK r29
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null
+          NDK=$("$SDKM" --list 2>/dev/null | grep -o 'ndk;29\.[0-9.]*' | sort -V | tail -1)
+          echo "Using $NDK"
+          "$SDKM" "platforms;android-36" "build-tools;36.0.0" "$NDK" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${NDK#ndk;}" >> "$GITHUB_ENV"
+      - name: Debug signing key
+        run: |
+          mkdir -p ~/.android
+          keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey \
+            -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+      - name: Rust emulator for Android
+        run: sh scripts/android/build-headless.sh
+      - name: Firmware-free APK
+        env:
+          OPENSAAB_BUNDLE_SUPPORT: '0'
+        run: python3 scripts/android/build-tech2-app.py --version-name 0.1.0-preview.98 --version-code 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opensaab-vlinker-debug-apk
+          path: target/android-tech2-app/opensaab-tech2.apk
+          if-no-files-found: error
