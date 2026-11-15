@@ -515,7 +515,8 @@ public final class MainActivity extends Activity {
                 final String text=line;
                 // Avoid thousands of pending UI callbacks from boot diagnostics.
                 if(text.startsWith("LCD:") || text.startsWith("KEYPAD:") || text.startsWith("SESSION:") || text.contains("ERROR") || text.contains("CRASH") || text.contains("| CANDI]")) {
-                    ui.post(()->{append(text);if(text.startsWith("LCD:") && process==child && running && !stopping.get())status.setText("Emulation mode • Offline • No vehicle connection");});
+                    // Adapter sessions keep their own label: LCD output is not "offline".
+                    ui.post(()->{append(text);if(text.startsWith("LCD:") && process==child && running && !stopping.get())status.setText(mxDevice==null?"Emulation mode • Offline • No vehicle connection":liveVlinker?"vLinker read session • original firmware running":"MX+ read session • original firmware running");});
                 }
             }
         } catch(IOException e) { ui.post(()->append("Console closed: "+e.getMessage())); }
