@@ -1163,6 +1163,11 @@ fn run(attempt: u64, retained: &mut Option<(tech2_emu::capture::CaptureStorage, 
     }
     if let Some(capture) = &bus.capture_storage { *retained = Some((capture.clone(),bus.psos_files.clone())); }
     println!("\nREPORT insns={insns} stop={stop}");
+    // Opt-in analysis aid: guest RAM ($100000..) and ERAM at session end.
+    if std::env::var_os("GUEST_RAM_DUMP").is_some() {
+        let _ = std::fs::write(opts.output.join("guest-ram.bin"), &bus.ram);
+        let _ = std::fs::write(opts.output.join("guest-eram.bin"), &bus.eram);
+    }
     if let Some(before) = &initial_security_ssa {
         if let Err(e) = artifacts::save_security_snapshot(&bus, before, &opts.output).and_then(|()| {
             if bus.ssa_flash.as_ref().is_some_and(|flash| flash.status().is_none()) {
