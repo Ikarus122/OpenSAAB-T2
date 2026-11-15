@@ -10,7 +10,11 @@
 //! Scope limits, stated rather than hidden:
 //! - Read-only: identification, data/DTC reads, tester present and start/stop
 //!   communication pass; anything else is refused without being sent.
-//! - The ELM performs the fast init itself on the first request.
+//! - StartCommunication (`81`) is not sent as data: the ELM performs the fast init itself
+//!   (`ATFI`) and swallows the module's `C1` reply, and the DICE ignores a second `81`
+//!   inside its session. The reply frame is rebuilt from the module's key bytes as the
+//!   ELM read them on the bus (`ATKW`). An open session is closed first (`ATPC`) and left
+//!   to time out, because the DICE refuses a new wake-up while its session runs.
 //! - One final reply frame is returned per request ("response pending" frames are skipped).
 use super::Link;
 use std::{path::Path, time::Duration};
@@ -126,6 +130,21 @@ fn hex(bytes: &[u8]) -> String {
 pub struct KlineSession {
     link: Link,
     header: Option<[u8; 3]>,
+    /// The ELM holds a K-line session (and keeps it alive) with the current target.
+    active: bool,
+}
+
+/// ISO 14230 P3max (5 s) plus margin: a module drops its session after this silence.
+const SESSION_TIMEOUT: Duration = Duration::from_millis(5500);
+
+/// Key bytes from `ATKW` output (`1:6B 2:8F`); `--` means none were read.
+pub(crate) fn key_bytes(lines: &[String]) -> Option<(u8, u8)> {
+    let text = lines.join(" ");
+    let byte = |tag: &str| {
+        let at = text.find(tag)? + tag.len();
+        u8::from_str_radix(text.get(at..at + 2)?, 16).ok()
+    };
+    Some((byte("1:")?, byte("2:")?))
 }
 
 impl KlineSession {
@@ -140,7 +159,7 @@ impl KlineSession {
         }
         link.configured = true;
         link.record(serde_json::json!({"kline_setup_complete":true,"protocol":"ISO 14230 fast init (ATSP5)","pin":7,"policy":"read-only"}))?;
-        Ok(Self { link, header: None })
+        Ok(Self { link, header: None, active: false })
     }
 
     /// Sends one guest frame and returns the reply frames. Refused or unanswered requests
@@ -158,12 +177,45 @@ impl KlineSession {
         if self.header != Some(header) {
             self.link.exact(&format!("ATSH{}", hex(&header)), "OK")?;
             self.header = Some(header);
+            self.active = false;
+        }
+        if f.data == [0x81] {
+            return self.start_communication(&f);
         }
         let lines = self
             .link
             .reply_within(&hex(f.data), Duration::from_secs(6))?;
         let frames = parse_reply(&lines, f.source, f.target, f.format & 0x40 != 0)?;
+        if !frames.is_empty() || lines.iter().any(|l| l.starts_with("BUS INIT") && l.contains("OK")) {
+            self.active = true;
+        }
         self.link.record(serde_json::json!({"kline_rx_lines":lines,"frames":frames.iter().map(|v|hex(v)).collect::<Vec<_>>()}))?;
+        Ok(frames)
+    }
+
+    /// Fast init on the bus; returns the module's positive reply (`C1`, key bytes).
+    fn start_communication(&mut self, f: &Frame) -> Result<Vec<Vec<u8>>, String> {
+        if self.active {
+            self.link.exact("ATPC", "OK")?;
+            self.active = false;
+            std::thread::sleep(SESSION_TIMEOUT);
+        }
+        let init = self.link.reply_within("ATFI", Duration::from_secs(6))?;
+        if !init.iter().any(|l| l.starts_with("BUS INIT") && l.contains("OK")) {
+            self.link.record(serde_json::json!({"kline_fast_init":init}))?;
+            return Ok(vec![]);
+        }
+        self.active = true;
+        let kw = self.link.reply_within("ATKW", Duration::from_secs(2))?;
+        let frames = match key_bytes(&kw) {
+            Some((kb1, kb2)) => {
+                let mut r = vec![0x83, f.source, f.target, 0xC1, kb1, kb2];
+                r.push(checksum(&r));
+                vec![r]
+            }
+            None => vec![],
+        };
+        self.link.record(serde_json::json!({"kline_fast_init":init,"key_bytes":kw,"frames":frames.iter().map(|v|hex(v)).collect::<Vec<_>>()}))?;
         Ok(frames)
     }
 }
@@ -236,6 +288,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got, vec![vec![0x82, 0xF1, 0x41, 0x5A, 0x90, 0x9E]]);
+    }
+
+    #[test]
+    fn key_bytes_from_elm() {
+        assert_eq!(key_bytes(&lines(&["1:6B 2:8F "])), Some((0x6B, 0x8F)));
+        assert_eq!(key_bytes(&lines(&["1:-- 2:--"])), None);
     }
 
     #[test]
