@@ -169,6 +169,11 @@ pub fn before_instruction(cpu: &mut CpuCore, bus: &mut Tech2Bus) {
     let request = bus.read_long(state + 0x10);
     // The replaced call's return address and arguments leave the stack as its `rtd #8`.
     let (ret, caller_sp) = (bus.read_long(sp), sp + 12);
+    // The exchange is over when the adapter returns: the link is idle again, as the
+    // firmware's timer handler leaves it after P3 (`$EA` state 0, `$114` clear). Without
+    // this the transmit task keeps the next request waiting for a timer that never runs.
+    bus.write_word(state + 0xEA, 0);
+    bus.write_word(state + 0x114, 0);
     if request == 0 {
         cpu.pc = ret;
         cpu.set_sp(caller_sp);
@@ -176,7 +181,13 @@ pub fn before_instruction(cpu: &mut CpuCore, bus: &mut Tech2Bus) {
     }
     let len = (bus.read_word(request) as usize).min(RX_BUFFER);
     let data = bus.read_long(request + 8);
-    let frame: Vec<u8> = (0..len as u32).map(|i| bus.read_byte(data + i)).collect();
+    let mut frame: Vec<u8> = (0..len as u32).map(|i| bus.read_byte(data + i)).collect();
+    // The task's checksum byte is not reliable (its sum register is never cleared between
+    // frames); the transmit interrupt sends its own running sum as the last byte instead
+    // (`$1D389A`, from `$E8`). Same here.
+    if let Some((last, body)) = frame.split_last_mut() {
+        *last = body.iter().fold(0u8, |a, v| a.wrapping_add(*v));
+    }
     // The transmission is complete once the adapter has it; the task must not wait.
     bus.write_long(state + 0x10, 0);
     let mut session = bus.kline.take().unwrap();
