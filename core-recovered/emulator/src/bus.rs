@@ -152,6 +152,12 @@ static ERAM_TRACE: LazyLock<bool> = LazyLock::new(|| env::var_os("ERAM_TRACE").i
 static ERAM_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 const ERAM_TRACE_LIMIT: usize = 512;
 static CFI_TRACE: LazyLock<bool> = LazyLock::new(|| env::var_os("CFI_TRACE").is_some());
+/// Opt-in observation of the VCI-side hardware: DLC switch matrix ($401000..$4017FF),
+/// UART window ($400800..$40080F), QSM ($YFFC00..$YFFC1F) and TPU registers/parameter RAM.
+/// Read-only trace; it never changes a value or timing.
+static VCI_TRACE: LazyLock<bool> = LazyLock::new(|| env::var_os("VCI_TRACE").is_some());
+static VCI_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+const VCI_TRACE_LIMIT: usize = 20_000;
 static CFI_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 const CFI_TRACE_LIMIT: usize = 256;
 
@@ -225,6 +231,10 @@ impl Ata {
 
 pub struct Tech2Bus {
     pub candi_link: Option<crate::candi::native_link::NativeLink>,
+    /// Host K-line for the firmware's KW2000 link (`--kline-vlinker-token`).
+    pub kline: Option<tech2_emu::adapters::vlinker_guest::KlineSession>,
+    /// Reply frame waiting for its echo to be posted first: (link, frame).
+    pub kline_reply: Option<(u32, Vec<u8>)>,
     pub pending_candi: Option<crate::candi::demand::Pending>,
     pub demand_boot_complete: bool,
     pub demand_guest_init: Option<crate::candi::demand::GuestInit>,
@@ -347,6 +357,8 @@ impl Tech2Bus {
             demand_boot_complete: self.demand_boot_complete,
             demand_guest_init: self.demand_guest_init.clone(),
             candi_link: None, // Checkpoint::capture copies the virtual link separately and handles errors.
+            kline: None,
+            kline_reply: None,
             execution_mode: self.execution_mode,
             flash: self.flash.clone(),
             ram: self.ram.clone(),
@@ -585,6 +597,8 @@ impl Tech2Bus {
         f[..n].copy_from_slice(&flash[..n]);
         let mut s = Self {
             candi_link: None,
+            kline: None,
+            kline_reply: None,
             pending_candi: None,
             demand_boot_complete: false,
             demand_guest_init: None,
@@ -1033,6 +1047,38 @@ impl Tech2Bus {
         } else {
             self.switch_rows[row] &= !(1 << col);
             self.switch_cols[col] &= !(1 << row);
+        }
+    }
+
+    fn trace_vci(&self, kind: char, a: u32, value: u8) {
+        if !*VCI_TRACE {
+            return;
+        }
+        let what = if (0x401000..0x401800).contains(&a) {
+            if kind == 'R' {
+                return;
+            }
+            let state = if value & 3 == 3 { "CLEAR_ALL" } else if value & 1 != 0 { "ON" } else { "OFF" };
+            format!("switch row={} col={} {state}", (a >> 1) & 15, (a >> 5) & 7)
+        } else if (0x400800..0x400810).contains(&a) {
+            format!("uart_b reg={:#x}", a - 0x400800)
+        } else if let Some(off) = sim_off(a) {
+            if (0xc00..0xc20).contains(&off) {
+                format!("qsm off={off:#05x}")
+            } else if (0xe00..0x1000).contains(&off) {
+                if kind == 'R' && off < 0xf00 {
+                    return;
+                }
+                format!("tpu off={off:#05x}")
+            } else {
+                return;
+            }
+        } else {
+            return;
+        };
+        let n = VCI_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+        if n < VCI_TRACE_LIMIT {
+            eprintln!("VCI_TRACE #{n:05} pc={:#010x} {kind} {what} value={value:#04x}", self.current_pc);
         }
     }
 
@@ -1847,6 +1893,7 @@ impl AddressBus for Tech2Bus {
     fn read_byte(&mut self, address: u32) -> u8 {
         let a = address & A24;
         self.trace_eram_access('R', a, None);
+        self.trace_vci('R', a, 0);
         if (ERAM_BASE..ERAM_BASE+ERAM_SIZE).contains(&a) {
             if let Some(capture)=&mut self.capture_storage {
                 if capture.inserted { return capture.read8((self.bank>>2)*CARD_WIN+a-ERAM_BASE,self.bank as u8,self.rtc[8]); }
@@ -2071,6 +2118,7 @@ impl AddressBus for Tech2Bus {
     fn write_byte(&mut self, address: u32, value: u8) {
         let a = address & A24;
         self.trace_eram_access('W', a, Some(value));
+        self.trace_vci('W', a, value);
         if (ERAM_BASE..ERAM_BASE+ERAM_SIZE).contains(&a) {
             if let Some(capture)=&mut self.capture_storage {
                 if capture.inserted { capture.write8((self.bank>>2)*CARD_WIN+a-ERAM_BASE,value); return; }

@@ -109,6 +109,8 @@ pub fn step_guest(cpu: &mut CpuCore, bus: &mut Tech2Bus, insns: u64) -> StepResu
     if bus.failure_reason.is_some(){return StepResult::Stopped;}
     candi::demand::guest_dependency(cpu, bus);
     if bus.failure_reason.is_some() { return StepResult::Stopped; }
+    crate::kline_hle::before_instruction(cpu, bus);
+    if bus.failure_reason.is_some() { return StepResult::Stopped; }
     let pc = cpu.pc;
     bus.current_pc = pc;
     communication::observe(cpu, bus);

@@ -44,6 +44,7 @@ use std::path::Path;
 
 mod psos;
 mod guest;
+mod kline_hle;
 pub use guest::{service_interrupt, step_guest};
 use guest::BOOT_TRACE;
 
@@ -898,6 +899,9 @@ fn run(attempt: u64, retained: &mut Option<(tech2_emu::capture::CaptureStorage, 
         bus.candi_link.as_mut().ok_or_else(|| (2,"Missing native CANdi".into()))?
             .attach_obdlink(token,&opts.output).map_err(|e| (2,e))?;
     }
+    if let Some(token) = &opts.kline_vlinker_token {
+        bus.kline = Some(tech2_emu::adapters::vlinker_guest::KlineSession::start(token, &opts.output).map_err(|e| (2, e))?);
+    }
     if let Some(token) = &opts.candi_vlinker_token {
         bus.candi_link.as_mut().ok_or_else(|| (2,"Missing native CANdi".into()))?
             .attach_vlinker(token,&opts.output).map_err(|e| (2,e))?;
@@ -1163,6 +1167,11 @@ fn run(attempt: u64, retained: &mut Option<(tech2_emu::capture::CaptureStorage, 
     }
     if let Some(capture) = &bus.capture_storage { *retained = Some((capture.clone(),bus.psos_files.clone())); }
     println!("\nREPORT insns={insns} stop={stop}");
+    // Opt-in analysis aid: guest RAM ($100000..) and ERAM at session end.
+    if std::env::var_os("GUEST_RAM_DUMP").is_some() {
+        let _ = std::fs::write(opts.output.join("guest-ram.bin"), &bus.ram);
+        let _ = std::fs::write(opts.output.join("guest-eram.bin"), &bus.eram);
+    }
     if let Some(before) = &initial_security_ssa {
         if let Err(e) = artifacts::save_security_snapshot(&bus, before, &opts.output).and_then(|()| {
             if bus.ssa_flash.as_ref().is_some_and(|flash| flash.status().is_none()) {

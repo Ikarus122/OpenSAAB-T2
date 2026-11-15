@@ -444,9 +444,11 @@ public final class MainActivity extends Activity {
                 args.add(args.size()-1,"--research-harness");args.add(args.size()-1,"--candi-native-link");
                 args.add(args.size()-1,"--candi-firmware");args.add(args.size()-1,new File(firmware,"candi.bin").toString());
                 args.add(args.size()-1,"--opsys");args.add(args.size()-1,new File(firmware,"opsys.dwn").toString());
-                if(liveVlinker){vlinkerBridge=new com.opensaab.usb.VlinkerNativeBridge(this,mxDevice,mxCompatibility);args.add(args.size()-1,"--candi-vlinker-token");args.add(args.size()-1,vlinkerBridge.token());}
-                else{mxBridge=new com.opensaab.usb.MxNativeBridge(this,mxDevice,mxCompatibility);args.add(args.size()-1,"--candi-obdlink-token");args.add(args.size()-1,mxBridge.token());}
-                args.add(args.size()-1,"--harness-target");args.add(args.size()-1,"native-manual");
+                // vLinker: the Tech 2's own path on the 9-5 OG, K-line on pin 7 to DICE (the gateway
+                // to the P/I-bus), not the CAN pins 6/14, which the 2006 9-5 DLC does not have.
+                if(liveVlinker){vlinkerBridge=new com.opensaab.usb.VlinkerNativeBridge(this,mxDevice,mxCompatibility);args.add(args.size()-1,"--kline-vlinker-token");args.add(args.size()-1,vlinkerBridge.token());}
+                else{mxBridge=new com.opensaab.usb.MxNativeBridge(this,mxDevice,mxCompatibility);args.add(args.size()-1,"--candi-obdlink-token");args.add(args.size()-1,mxBridge.token());
+                    args.add(args.size()-1,"--harness-target");args.add(args.size()-1,"native-manual");}
             }
             ProcessBuilder builder=new ProcessBuilder(args).directory(session).redirectErrorStream(true);
             com.opensaab.usb.DemandStartup.configure(this,builder);
@@ -515,7 +517,8 @@ public final class MainActivity extends Activity {
                 final String text=line;
                 // Avoid thousands of pending UI callbacks from boot diagnostics.
                 if(text.startsWith("LCD:") || text.startsWith("KEYPAD:") || text.startsWith("SESSION:") || text.contains("ERROR") || text.contains("CRASH") || text.contains("| CANDI]")) {
-                    ui.post(()->{append(text);if(text.startsWith("LCD:") && process==child && running && !stopping.get())status.setText("Emulation mode • Offline • No vehicle connection");});
+                    // Adapter sessions keep their own label: LCD output is not "offline".
+                    ui.post(()->{append(text);if(text.startsWith("LCD:") && process==child && running && !stopping.get())status.setText(mxDevice==null?"Emulation mode • Offline • No vehicle connection":liveVlinker?"vLinker read session • original firmware running":"MX+ read session • original firmware running");});
                 }
             }
         } catch(IOException e) { ui.post(()->append("Console closed: "+e.getMessage())); }
