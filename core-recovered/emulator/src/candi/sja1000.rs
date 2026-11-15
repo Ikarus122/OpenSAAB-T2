@@ -158,7 +158,20 @@ impl Controller {
         (self.registers[6], self.registers[7])
     }
 
+    /// SJA1000 datasheet (2000 Jan 04), Table 1 note 1: in BasicCAN mode "the registers
+    /// are repeated within higher CAN address areas (the most significant bits of the
+    /// 8-bit CPU address are not decoded: CAN address 32 continues with CAN address 0 and
+    /// so on)". PeliCAN maps its 80-byte internal RAM from address 32 instead.
+    fn decode(&self, offset: u8) -> u8 {
+        if self.pelican() {
+            offset
+        } else {
+            offset & 0x1f
+        }
+    }
+
     pub fn read(&mut self, offset: u8) -> Option<u8> {
+        let offset = self.decode(offset);
         let i = usize::from(offset);
         if offset == 0 {
             return Some(self.registers[0] | if self.pelican() { 0 } else { 0xe0 });
@@ -207,7 +220,28 @@ impl Controller {
 
     /// Error stops native execution. A TX request includes its composed frame.
     pub fn write(&mut self, offset: u8, value: u8) -> Result<(), String> {
+        let offset = self.decode(offset);
         let i = usize::from(offset);
+        // BasicCAN write semantics from the datasheet's Table 1 (WRITE column): the
+        // status, interrupt and receive-buffer registers and the unused address 30 are
+        // read-only, so a write has no effect. The CANdi firmware clears addresses
+        // 32.. on a controller still in BasicCAN mode, which (mirrored) touches them all.
+        // TX buffer bytes (10..19) are accepted without storage: BasicCAN TX stays
+        // unsupported by `command`, so no frame can be built from them.
+        if !self.pelican() {
+            match offset {
+                2 | 3 | 20..=30 => return Ok(()),
+                10..=19 => return Ok(()),
+                // Test register: production test only; zero keeps normal operation.
+                9 if value == 0 => return Ok(()),
+                // CAN mode (bit 7) and CBP (bit 6) are writable in reset mode only.
+                31 if !self.reset() => {
+                    self.registers[31] = (self.registers[31] & 0xc0) | (value & 0x3f & !0x10);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         match offset {
             0 => {
                 let was_reset = self.reset();
@@ -749,6 +783,37 @@ mod tests {
         assert_eq!(c.read(29), Some(1));
     }
 
+    #[test]
+    fn basiccan_higher_addresses_repeat_the_register_bank() {
+        // Captured CANdi sequence on controller 2 after "2006 SAAB 9-5 -> Engine ->
+        // Trionic": control register 0xE1 (reset request), then 0x00 at CAN address 32.
+        let mut c = Controller::default();
+        assert_eq!(c.read(31).map(|v| v & 0x80), Some(0)); // BasicCAN after reset.
+        c.write(0, 0xe1).unwrap();
+        assert_eq!(c.read(32), c.read(0));
+        assert_eq!(c.read(0).map(|v| v & 1), Some(1));
+        // Address 32 is the control register again: this leaves reset mode.
+        c.write(32, 0).unwrap();
+        assert_eq!(c.read(0).map(|v| v & 1), Some(0));
+        assert_eq!(c.read(0x20 + 31), c.read(31));
+        // The captured clear loop then writes zero across 32..: read-only registers
+        // ignore it, CDR keeps its reset-only CAN-mode bit, and no frame is sent.
+        let (status, cdr) = (c.read(2), c.read(31));
+        for offset in 33..112u8 {
+            c.write(offset, 0).unwrap();
+        }
+        assert_eq!(c.read(2), status);
+        assert_eq!(c.read(31).map(|v| v & 0xc0), cdr.map(|v| v & 0xc0));
+        assert!(c.write(9, 1).is_err());
+        assert!(c.write(1, 1).is_err(), "BasicCAN TX stays unsupported");
+        // PeliCAN keeps its internal RAM at 32..111 (reset mode only for writes).
+        c.write(0, 1).unwrap();
+        c.write(31, 0x80).unwrap();
+        c.write(32, 0x5a).unwrap();
+        assert_eq!(c.read(32), Some(0x5a));
+        assert_ne!(c.read(0), Some(0x5a));
+        assert_eq!(c.read(128), None);
+    }
     #[test]
     fn configuration_is_separate_from_tx_and_empty_rx() {
         let mut c = Controller::default();
