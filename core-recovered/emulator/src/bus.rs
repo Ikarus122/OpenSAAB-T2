@@ -231,6 +231,8 @@ impl Ata {
 
 pub struct Tech2Bus {
     pub candi_link: Option<crate::candi::native_link::NativeLink>,
+    /// Host K-line for the firmware's KW2000 link (`--kline-vlinker-token`).
+    pub kline: Option<tech2_emu::adapters::vlinker_guest::KlineSession>,
     pub pending_candi: Option<crate::candi::demand::Pending>,
     pub demand_boot_complete: bool,
     pub demand_guest_init: Option<crate::candi::demand::GuestInit>,
@@ -353,6 +355,7 @@ impl Tech2Bus {
             demand_boot_complete: self.demand_boot_complete,
             demand_guest_init: self.demand_guest_init.clone(),
             candi_link: None, // Checkpoint::capture copies the virtual link separately and handles errors.
+            kline: None,
             execution_mode: self.execution_mode,
             flash: self.flash.clone(),
             ram: self.ram.clone(),
@@ -591,6 +594,7 @@ impl Tech2Bus {
         f[..n].copy_from_slice(&flash[..n]);
         let mut s = Self {
             candi_link: None,
+            kline: None,
             pending_candi: None,
             demand_boot_complete: false,
             demand_guest_init: None,

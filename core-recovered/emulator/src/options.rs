@@ -61,6 +61,7 @@ pub struct Options {
     pub data_display: bool,
     pub candi_obdlink_token: Option<String>,
     pub candi_vlinker_token: Option<String>,
+    pub kline_vlinker_token: Option<String>,
     pub output: PathBuf,
     pub max_insns: u64,
     pub warmup_insns: u64,
@@ -151,7 +152,7 @@ impl Options {
             opsys: None,
             config: None,
             config_check: false, save_config: None, config_edits: Default::default(),
-            capture_directory: None, capture_inserted: false, capture_allow_empty: false, data_display: false, candi_obdlink_token: None, candi_vlinker_token: None,
+            capture_directory: None, capture_inserted: false, capture_allow_empty: false, data_display: false, candi_obdlink_token: None, candi_vlinker_token: None, kline_vlinker_token: None,
             output: PathBuf::from("."),
             max_insns: crate::bus::MAX_INSNS_DEFAULT,
             warmup_insns: 80_000_000,
@@ -195,12 +196,13 @@ impl Options {
                     "--candi" => { out.candi = true; continue; }
                     "--ecm-information" => { out.ecm_information = true; continue; }
                     "--help" | "-help" => { out.help = true; continue; }
-                    "--candi-obdlink-token" | "--candi-vlinker-token" | "--candi-chipsoft-port" | "--candi-chipsoft-usb-token" | "--candi-j2534-adapter" | "--candi-nano-usb-token" | "--candi-nano-ssh" | "--candi-nano-control" | "--ibus-dtc" | "--vcx-ecu" | "--vcx-ssh" | "--vcx-ssh-control" | "--candi-firmware" | "--replay-keys" | "--boot" | "--opsys" | "--config" | "--save-config" | "--edit-option" | "--capture-directory" | "--output-dir" | "--max-insns" | "--warmup-insns" | "--harness-target" => {
+                    "--candi-obdlink-token" | "--candi-vlinker-token" | "--kline-vlinker-token" | "--candi-chipsoft-port" | "--candi-chipsoft-usb-token" | "--candi-j2534-adapter" | "--candi-nano-usb-token" | "--candi-nano-ssh" | "--candi-nano-control" | "--ibus-dtc" | "--vcx-ecu" | "--vcx-ssh" | "--vcx-ssh-control" | "--candi-firmware" | "--replay-keys" | "--boot" | "--opsys" | "--config" | "--save-config" | "--edit-option" | "--capture-directory" | "--output-dir" | "--max-insns" | "--warmup-insns" | "--harness-target" => {
                         let value = args.next().filter(|v| !v.is_empty() && !v.starts_with("--"))
                             .ok_or_else(|| format!("{arg} requires a value"))?;
                         match arg.as_str() {
                             "--candi-obdlink-token" => out.candi_obdlink_token=Some(value),
                             "--candi-vlinker-token" => out.candi_vlinker_token=Some(value),
+                            "--kline-vlinker-token" => out.kline_vlinker_token=Some(value),
                             "--save-config" => out.save_config=Some(value.into()),
                             "--capture-directory" => out.capture_directory=Some(value.into()),
                             "--edit-option" => {
@@ -259,6 +261,11 @@ impl Options {
         if let Some(token) = &out.candi_vlinker_token {
             if token.len()!=32 || !token.bytes().all(|b|b.is_ascii_hexdigit()) || !out.interactive_headless || !out.candi_native_link || !out.research || out.target!=HarnessTarget::NativeManual || out.candi_on_demand || out.candi_obdlink_token.is_some() || out.candi_chipsoft_port.is_some() || out.candi_chipsoft_usb_token.is_some() || out.candi_nano_usb_token.is_some() || out.candi_nano_ssh.is_some() || out.replay.is_some() {
                 return Err("vLinker requires an exclusive native-manual interactive read session and a valid app token".into());
+            }
+        }
+        if let Some(token) = &out.kline_vlinker_token {
+            if token.len()!=32 || !token.bytes().all(|b|b.is_ascii_hexdigit()) || !out.interactive_headless || !out.research || out.candi_vlinker_token.is_some() || out.candi_obdlink_token.is_some() || out.replay.is_some() {
+                return Err("vLinker K-line requires an interactive research session, a valid app token and no other vLinker/MX+ owner".into());
             }
         }
         if let Some(token) = &out.candi_obdlink_token {

@@ -223,11 +223,14 @@ impl Link {
         Ok(items)
     }
     fn reply(&mut self, cmd: &str) -> Result<Vec<String>, String> {
+        self.reply_within(cmd, Duration::from_secs(3))
+    }
+    fn reply_within(&mut self, cmd: &str, limit: Duration) -> Result<Vec<String>, String> {
         if self.receiving {
             return Err("ELM setup requires an idle prompt".into());
         }
         self.send(cmd)?;
-        let end = Instant::now() + Duration::from_secs(3);
+        let end = Instant::now() + limit;
         let mut lines = vec![];
         while self.receiving {
             if Instant::now() > end {
@@ -256,6 +259,15 @@ impl Link {
         Ok(())
     }
     fn setup(&mut self) -> Result<(), String> {
+        self.identify()?;
+        for cmd in SETUP {
+            self.exact(cmd, "OK")?;
+        }
+        self.configured = true;
+        self.record(serde_json::json!({"setup_complete":true,"bus":"HS-CAN first; SW-CAN 33.3k data frames on demand, no wake","bitrate":500000,"raw_frames":true,"receive_filter":"T7 ECM replies 0x238/0x258 (ATCF218 ATCM79F)","host_flow_control":false,"host_ISOTP_assembly":false,"sw_can":"data frames only"}))
+    }
+    /// Reset, MIC3313 identity and battery-voltage gate shared by the CAN and K-line modes.
+    fn identify(&mut self) -> Result<(), String> {
         // A sleeping adapter may publish a reset banner when RFCOMM opens.
         let end = Instant::now() + Duration::from_secs(2);
         let mut quiet = Instant::now();
@@ -297,12 +309,7 @@ impl Link {
                 "Bench adapter voltage unavailable or outside 11.5–15.5 V: {volts:?}"
             ));
         }
-        self.record(serde_json::json!({"adapter_firmware":self.firmware,"adapter_voltage":voltage,"source":"ATRV"}))?;
-        for cmd in SETUP {
-            self.exact(cmd, "OK")?;
-        }
-        self.configured = true;
-        self.record(serde_json::json!({"setup_complete":true,"bus":"HS-CAN first; SW-CAN 33.3k data frames on demand, no wake","bitrate":500000,"raw_frames":true,"receive_filter":"T7 ECM replies 0x238/0x258 (ATCF218 ATCM79F)","host_flow_control":false,"host_ISOTP_assembly":false,"sw_can":"data frames only"}))
+        self.record(serde_json::json!({"adapter_firmware":self.firmware,"adapter_voltage":voltage,"source":"ATRV"}))
     }
     fn select_bus(&mut self, controller: usize) -> Result<(), String> {
         if controller == self.controller {
@@ -716,6 +723,11 @@ mod tests {
     }
 }
 
+pub use kline::{KlineSession, KLINE_PROTOCOL_KW2000};
+
 #[cfg(test)]
 #[path = "vlinker_guest_tests.rs"]
 mod byte_peer_tests;
+
+#[path = "vlinker_kline.rs"]
+mod kline;

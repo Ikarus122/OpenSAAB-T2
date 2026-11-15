@@ -44,6 +44,7 @@ use std::path::Path;
 
 mod psos;
 mod guest;
+mod kline_hle;
 pub use guest::{service_interrupt, step_guest};
 use guest::BOOT_TRACE;
 
@@ -897,6 +898,9 @@ fn run(attempt: u64, retained: &mut Option<(tech2_emu::capture::CaptureStorage, 
     if let Some(token) = &opts.candi_obdlink_token {
         bus.candi_link.as_mut().ok_or_else(|| (2,"Missing native CANdi".into()))?
             .attach_obdlink(token,&opts.output).map_err(|e| (2,e))?;
+    }
+    if let Some(token) = &opts.kline_vlinker_token {
+        bus.kline = Some(tech2_emu::adapters::vlinker_guest::KlineSession::start(token, &opts.output).map_err(|e| (2, e))?);
     }
     if let Some(token) = &opts.candi_vlinker_token {
         bus.candi_link.as_mut().ok_or_else(|| (2,"Missing native CANdi".into()))?
