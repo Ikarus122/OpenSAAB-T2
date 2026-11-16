@@ -126,12 +126,19 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|v| format!("{v:02X}")).collect()
 }
 
-/// Exclusive K-line session on the vLinker byte bridge.
-pub struct KlineSession {
-    link: Link,
+/// ELM K-line state: the current `ATSH` header and whether the ELM holds (and keeps
+/// alive) a session with that target.
+#[derive(Default)]
+pub(crate) struct KlineState {
     header: Option<[u8; 3]>,
-    /// The ELM holds a K-line session (and keeps it alive) with the current target.
     active: bool,
+}
+
+impl KlineState {
+    /// The ELM holds a session (and keeps it alive) with the current target.
+    pub(crate) fn active(&self) -> bool {
+        self.active
+    }
 }
 
 /// ISO 14230 P3max (5 s) plus margin: a module drops its session after this silence.
@@ -147,6 +154,101 @@ pub(crate) fn key_bytes(lines: &[String]) -> Option<(u8, u8)> {
     Some((byte("1:")?, byte("2:")?))
 }
 
+/// K-line protocol on an ELM already configured with headers and spaces on (`ATH1`,
+/// `ATS1`), as both the K-line and the CAN setup leave it.
+const KLINE_ENTER: [&str; 4] = ["ATSP5", "ATKW0", "ATAT1", "ATST96"];
+
+/// Switches a CAN-configured link to K-line (the shared CANdi worker).
+pub(crate) fn enter(link: &mut Link) -> Result<(), String> {
+    link.exact("ATPC", "OK")?;
+    for cmd in KLINE_ENTER {
+        link.exact(cmd, "OK")?;
+    }
+    link.record(serde_json::json!({"bus_switch":"K-line","protocol":"ISO 14230 fast init (ATSP5)","pin":7}))
+}
+
+/// Sends one guest frame and returns the reply frames. Refused or unanswered requests
+/// return no frame; the guest then times out as with a silent module.
+pub(crate) fn exchange_on(
+    link: &mut Link,
+    state: &mut KlineState,
+    frame: &[u8],
+) -> Result<Vec<Vec<u8>>, String> {
+    let f = split(frame)?;
+    link.record(serde_json::json!({"guest_kline_tx":hex(frame)}))?;
+    if !read_only(f.data) {
+        link.record(serde_json::json!({"kline_refused_not_read_only":hex(f.data)}))?;
+        return Ok(vec![]);
+    }
+    let header = [f.format & 0xC0, f.target, f.source];
+    if state.header != Some(header) {
+        link.exact(&format!("ATSH{}", hex(&header)), "OK")?;
+        state.header = Some(header);
+        state.active = false;
+    }
+    if f.data == [0x81] {
+        return start_communication(link, state, &f);
+    }
+    let lines = link.reply_within(&hex(f.data), Duration::from_secs(6))?;
+    let frames = parse_reply(&lines, f.source, f.target, f.format & 0x40 != 0)?;
+    if !frames.is_empty() || lines.iter().any(|l| l.starts_with("BUS INIT") && l.contains("OK")) {
+        state.active = true;
+    }
+    link.record(serde_json::json!({"kline_rx_lines":lines,"frames":frames.iter().map(|v|hex(v)).collect::<Vec<_>>()}))?;
+    Ok(frames)
+}
+
+/// Fast init on the bus; returns the module's positive reply (`C1`, key bytes).
+fn start_communication(
+    link: &mut Link,
+    state: &mut KlineState,
+    f: &Frame,
+) -> Result<Vec<Vec<u8>>, String> {
+    if state.active {
+        link.exact("ATPC", "OK")?;
+        state.active = false;
+        std::thread::sleep(SESSION_TIMEOUT);
+    }
+    let init = link.reply_within("ATFI", Duration::from_secs(6))?;
+    if !init.iter().any(|l| l.starts_with("BUS INIT") && l.contains("OK")) {
+        link.record(serde_json::json!({"kline_fast_init":init}))?;
+        return Ok(vec![]);
+    }
+    state.active = true;
+    let kw = link.reply_within("ATKW", Duration::from_secs(2))?;
+    let frames = match key_bytes(&kw) {
+        Some((kb1, kb2)) => {
+            let mut r = vec![0x83, f.source, f.target, 0xC1, kb1, kb2];
+            r.push(checksum(&r));
+            vec![r]
+        }
+        None => vec![],
+    };
+    link.record(serde_json::json!({"kline_fast_init":init,"key_bytes":kw,"frames":frames.iter().map(|v|hex(v)).collect::<Vec<_>>()}))?;
+    Ok(frames)
+}
+
+/// True for a positive StopCommunication reply: the guest has left K-line.
+pub(crate) fn stopped(request: &[u8], frames: &[Vec<u8>]) -> bool {
+    split(request).is_ok_and(|f| f.data == [0x82])
+        && frames.iter().any(|r| layout(r).is_some_and(|(h, _)| r.get(h) == Some(&0xC2)))
+}
+
+/// A K-line request for the shared worker and the channel its result comes back on.
+pub(crate) type KlineRequest = (Vec<u8>, std::sync::mpsc::SyncSender<Result<Vec<Vec<u8>>, String>>);
+
+enum Owner {
+    /// This session owns the vLinker (`--kline-vlinker-token`).
+    Own { link: Link, state: KlineState },
+    /// The CANdi worker owns the vLinker and switches it to K-line for each request.
+    Shared(std::sync::mpsc::SyncSender<KlineRequest>),
+}
+
+/// K-line access to the vLinker for the firmware's KW2000 link.
+pub struct KlineSession {
+    owner: Owner,
+}
+
 impl KlineSession {
     pub fn start(token: &str, directory: &Path) -> Result<Self, String> {
         if token.len() != 32 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -159,71 +261,36 @@ impl KlineSession {
         }
         link.configured = true;
         link.record(serde_json::json!({"kline_setup_complete":true,"protocol":"ISO 14230 fast init (ATSP5)","pin":7,"policy":"read-only"}))?;
-        Ok(Self { link, header: None, active: false })
+        Ok(Self { owner: Owner::Own { link, state: KlineState::default() } })
     }
 
-    /// Sends one guest frame and returns the reply frames. Refused or unanswered requests
-    /// return no frame; the guest then times out as with a silent module.
+    pub(crate) fn shared(worker: std::sync::mpsc::SyncSender<KlineRequest>) -> Self {
+        Self { owner: Owner::Shared(worker) }
+    }
+
     pub fn exchange(&mut self, frame: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-        let f = split(frame)?;
-        self.link
-            .record(serde_json::json!({"guest_kline_tx":hex(frame)}))?;
-        if !read_only(f.data) {
-            self.link
-                .record(serde_json::json!({"kline_refused_not_read_only":hex(f.data)}))?;
-            return Ok(vec![]);
-        }
-        let header = [f.format & 0xC0, f.target, f.source];
-        if self.header != Some(header) {
-            self.link.exact(&format!("ATSH{}", hex(&header)), "OK")?;
-            self.header = Some(header);
-            self.active = false;
-        }
-        if f.data == [0x81] {
-            return self.start_communication(&f);
-        }
-        let lines = self
-            .link
-            .reply_within(&hex(f.data), Duration::from_secs(6))?;
-        let frames = parse_reply(&lines, f.source, f.target, f.format & 0x40 != 0)?;
-        if !frames.is_empty() || lines.iter().any(|l| l.starts_with("BUS INIT") && l.contains("OK")) {
-            self.active = true;
-        }
-        self.link.record(serde_json::json!({"kline_rx_lines":lines,"frames":frames.iter().map(|v|hex(v)).collect::<Vec<_>>()}))?;
-        Ok(frames)
-    }
-
-    /// Fast init on the bus; returns the module's positive reply (`C1`, key bytes).
-    fn start_communication(&mut self, f: &Frame) -> Result<Vec<Vec<u8>>, String> {
-        if self.active {
-            self.link.exact("ATPC", "OK")?;
-            self.active = false;
-            std::thread::sleep(SESSION_TIMEOUT);
-        }
-        let init = self.link.reply_within("ATFI", Duration::from_secs(6))?;
-        if !init.iter().any(|l| l.starts_with("BUS INIT") && l.contains("OK")) {
-            self.link.record(serde_json::json!({"kline_fast_init":init}))?;
-            return Ok(vec![]);
-        }
-        self.active = true;
-        let kw = self.link.reply_within("ATKW", Duration::from_secs(2))?;
-        let frames = match key_bytes(&kw) {
-            Some((kb1, kb2)) => {
-                let mut r = vec![0x83, f.source, f.target, 0xC1, kb1, kb2];
-                r.push(checksum(&r));
-                vec![r]
+        match &mut self.owner {
+            Owner::Own { link, state } => exchange_on(link, state, frame),
+            Owner::Shared(worker) => {
+                let (reply, result) = std::sync::mpsc::sync_channel(1);
+                worker
+                    .send((frame.to_vec(), reply))
+                    .map_err(|_| "vLinker worker closed".to_string())?;
+                // Covers a re-init (5.5 s session timeout + fast init) and a bus switch.
+                result
+                    .recv_timeout(Duration::from_secs(30))
+                    .map_err(|_| "vLinker K-line request unanswered by the worker".to_string())?
             }
-            None => vec![],
-        };
-        self.link.record(serde_json::json!({"kline_fast_init":init,"key_bytes":kw,"frames":frames.iter().map(|v|hex(v)).collect::<Vec<_>>()}))?;
-        Ok(frames)
+        }
     }
 }
 
 impl Drop for KlineSession {
     fn drop(&mut self) {
-        let (events, _unused) = std::sync::mpsc::sync_channel(1);
-        self.link.cleanup(&events);
+        if let Owner::Own { link, .. } = &mut self.owner {
+            let (events, _unused) = std::sync::mpsc::sync_channel(1);
+            link.cleanup(&events);
+        }
     }
 }
 

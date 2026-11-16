@@ -903,8 +903,8 @@ fn run(attempt: u64, retained: &mut Option<(tech2_emu::capture::CaptureStorage, 
         bus.kline = Some(tech2_emu::adapters::vlinker_guest::KlineSession::start(token, &opts.output).map_err(|e| (2, e))?);
     }
     if let Some(token) = &opts.candi_vlinker_token {
-        bus.candi_link.as_mut().ok_or_else(|| (2,"Missing native CANdi".into()))?
-            .attach_vlinker(token,&opts.output).map_err(|e| (2,e))?;
+        bus.kline = Some(bus.candi_link.as_mut().ok_or_else(|| (2,"Missing native CANdi".into()))?
+            .attach_vlinker(token,&opts.output).map_err(|e| (2,e))?);
     }
     if let Some(port) = &opts.candi_chipsoft_port {
         bus.candi_link.as_mut().ok_or_else(|| (2, "Missing native CANdi".into()))?
