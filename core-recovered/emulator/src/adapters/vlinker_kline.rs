@@ -158,6 +158,28 @@ pub(crate) fn key_bytes(lines: &[String]) -> Option<(u8, u8)> {
 /// `ATS1`), as both the K-line and the CAN setup leave it.
 const KLINE_ENTER: [&str; 4] = ["ATSP5", "ATKW0", "ATAT1", "ATST96"];
 
+/// One ELM K-line command. A late answer (a fast init the module does not answer can
+/// take longer than its nominal time on a busy adapter) is waited for until the prompt
+/// returns and then counts as no reply, so the link stays usable.
+fn ask(link: &mut Link, cmd: &str, limit: Duration) -> Result<Vec<String>, String> {
+    match link.reply_within(cmd, limit) {
+        Ok(lines) => Ok(lines),
+        Err(e) if e.starts_with("ELM command prompt timeout") && link.synchronized => {
+            let end = std::time::Instant::now() + Duration::from_secs(10);
+            while link.receiving {
+                if std::time::Instant::now() > end {
+                    link.synchronized = false;
+                    return Err(format!("{e}; no prompt after 10 s more"));
+                }
+                link.packet()?;
+            }
+            link.record(serde_json::json!({"kline_late_reply_discarded":cmd}))?;
+            Ok(vec![])
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Switches a CAN-configured link to K-line (the shared CANdi worker).
 pub(crate) fn enter(link: &mut Link) -> Result<(), String> {
     link.exact("ATPC", "OK")?;
@@ -189,7 +211,7 @@ pub(crate) fn exchange_on(
     if f.data == [0x81] {
         return start_communication(link, state, &f);
     }
-    let lines = link.reply_within(&hex(f.data), Duration::from_secs(6))?;
+    let lines = ask(link, &hex(f.data), Duration::from_secs(6))?;
     let frames = parse_reply(&lines, f.source, f.target, f.format & 0x40 != 0)?;
     if !frames.is_empty() || lines.iter().any(|l| l.starts_with("BUS INIT") && l.contains("OK")) {
         state.active = true;
@@ -209,13 +231,13 @@ fn start_communication(
         state.active = false;
         std::thread::sleep(SESSION_TIMEOUT);
     }
-    let init = link.reply_within("ATFI", Duration::from_secs(6))?;
+    let init = ask(link, "ATFI", Duration::from_secs(10))?;
     if !init.iter().any(|l| l.starts_with("BUS INIT") && l.contains("OK")) {
         link.record(serde_json::json!({"kline_fast_init":init}))?;
         return Ok(vec![]);
     }
     state.active = true;
-    let kw = link.reply_within("ATKW", Duration::from_secs(2))?;
+    let kw = ask(link, "ATKW", Duration::from_secs(3))?;
     let frames = match key_bytes(&kw) {
         Some((kb1, kb2)) => {
             let mut r = vec![0x83, f.source, f.target, 0xC1, kb1, kb2];
