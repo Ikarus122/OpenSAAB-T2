@@ -40,8 +40,16 @@ public final class VlinkerNativeBridge implements AutoCloseable {
         worker=new Thread(this::serve,"vlinker-native-owner");worker.start();
     }
     public String token(){return token;}
-    private static String line(InputStream input)throws IOException {
-        ByteArrayOutputStream b=new ByteArrayOutputStream();int n;while((n=input.read())!=-1&&n!=10){if(b.size()>=256)throw new IOException("vLinker bridge request too large");b.write(n);}if(n<0)throw new EOFException();return b.toString("US-ASCII");
+    /** Next request line. Silence between requests is normal (K-line: nothing is sent until the
+     *  guest transmits, e.g. while a message is on screen), so the read timeout only lets the loop
+     *  notice close(); EOF still ends the bridge. */
+    private String line(InputStream input)throws IOException {
+        ByteArrayOutputStream b=new ByteArrayOutputStream();int n;
+        while(true){
+            try{n=input.read();}catch(SocketTimeoutException idle){if(closed)throw idle;continue;}
+            if(n==-1||n==10)break;if(b.size()>=256)throw new IOException("vLinker bridge request too large");b.write(n);
+        }
+        if(n<0)throw new EOFException();return b.toString("US-ASCII");
     }
     private void serve(){
         try(Socket socket=server.accept()){
