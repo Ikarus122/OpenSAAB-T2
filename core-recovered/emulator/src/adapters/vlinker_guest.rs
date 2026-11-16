@@ -326,6 +326,15 @@ impl Link {
         self.controller = controller;
         self.record(serde_json::json!({"selected_controller":controller,"bus":if controller==0 {"HS-CAN"} else {"SW-CAN 33.3k"},"simultaneous_buses":false}))
     }
+    /// Back to HS-CAN after K-line: close the K-line protocol (ending the ELM keep-alive)
+    /// and restore the CAN timing, protocol and T7 filter from `SETUP`.
+    fn leave_kline(&mut self) -> Result<(), String> {
+        for cmd in ["ATPC", "ATAT0", "ATST19", "ATSP6", "ATCF218", "ATCM79F"] {
+            self.exact(cmd, "OK")?;
+        }
+        self.controller = 0;
+        self.record(serde_json::json!({"bus_switch":"HS-CAN","bitrate":500000}))
+    }
     fn monitor_command(&self) -> &'static str {
         if self.controller == 2 {
             MONITOR_SW
@@ -437,6 +446,7 @@ struct WorkerFailure {
 }
 pub struct Bridge {
     input: Option<SyncSender<(usize, CanTransmission)>>,
+    kline: SyncSender<kline::KlineRequest>,
     output: Receiver<Event>,
     errors: Receiver<WorkerFailure>,
     failure: Option<FailureContext>,
@@ -457,19 +467,48 @@ impl Bridge {
         let (input, requests) = mpsc::sync_channel::<(usize, CanTransmission)>(32);
         let (events, output) = mpsc::sync_channel(4096);
         let (error, errors) = mpsc::channel();
+        let (kline, kline_requests) = mpsc::sync_channel::<kline::KlineRequest>(1);
         let stop = Arc::new(AtomicBool::new(false));
         let cancelled = stop.clone();
         let worker = thread::spawn(move || {
             let result = (|| -> Result<(), String> {
                 link.setup()?;
+                // The Tech 2 identifies the car over K-line (DICE, pin 7) and reaches the
+                // bus modules through CANdi: one adapter, switched between the two.
+                let mut on_kline = false;
+                let mut kline_state = kline::KlineState::default();
                 while !cancelled.load(Ordering::Relaxed) {
                     if link.started.elapsed() > Duration::from_secs(1800) {
                         return Err(
                             "Private vLinker read session reached its 30-minute limit".into()
                         );
                     }
+                    if let Ok((frame, reply)) = kline_requests.try_recv() {
+                        link.interrupt_monitor(&events, "k-line-request")?;
+                        if !on_kline {
+                            kline::enter(&mut link)?;
+                            kline_state = kline::KlineState::default();
+                            on_kline = true;
+                        }
+                        let result = kline::exchange_on(&mut link, &mut kline_state, &frame);
+                        // Back to CAN monitoring as soon as no K-line session is held: after
+                        // StopCommunication, or a fast init no module answered (CANdi must
+                        // see the bus again while the guest retries the next system).
+                        let done = result.as_ref().is_ok_and(|f| kline::stopped(&frame, f))
+                            || !kline_state.active();
+                        let _ = reply.send(result);
+                        if done {
+                            link.leave_kline()?;
+                            on_kline = false;
+                        }
+                        continue;
+                    }
                     if let Ok((controller, tx)) = requests.try_recv() {
                         link.interrupt_monitor(&events, "next-guest-request")?;
+                        if on_kline {
+                            link.leave_kline()?;
+                            on_kline = false;
+                        }
                         link.active_tx = Some(FailureContext {
                             tx: crate::adapter_failure::TxContext::new(controller, &tx),
                             ticket: tx.ticket,
@@ -493,6 +532,8 @@ impl Bridge {
                             })
                             .map_err(|_| "ELM event queue full".to_string())?;
                         link.active_tx = None;
+                    } else if on_kline {
+                        thread::sleep(Duration::from_millis(5));
                     } else if !link.receiving {
                         let monitor = link.monitor_command();
                         link.send(monitor)?;
@@ -514,6 +555,7 @@ impl Bridge {
         });
         Self {
             input: Some(input),
+            kline,
             output,
             errors,
             failure: None,
@@ -528,6 +570,12 @@ impl Bridge {
             },
             confirmations: 0,
         }
+    }
+}
+impl Bridge {
+    /// K-line access through this bridge's worker (same adapter, switched per request).
+    pub fn kline_session(&self) -> KlineSession {
+        KlineSession::shared(self.kline.clone())
     }
 }
 impl Backend for Bridge {

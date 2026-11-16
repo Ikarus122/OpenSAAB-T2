@@ -444,11 +444,12 @@ public final class MainActivity extends Activity {
                 args.add(args.size()-1,"--research-harness");args.add(args.size()-1,"--candi-native-link");
                 args.add(args.size()-1,"--candi-firmware");args.add(args.size()-1,new File(firmware,"candi.bin").toString());
                 args.add(args.size()-1,"--opsys");args.add(args.size()-1,new File(firmware,"opsys.dwn").toString());
-                // vLinker: the Tech 2's own path on the 9-5 OG, K-line on pin 7 to DICE (the gateway
-                // to the P/I-bus), not the CAN pins 6/14, which the 2006 9-5 DLC does not have.
-                if(liveVlinker){vlinkerBridge=new com.opensaab.usb.VlinkerNativeBridge(this,mxDevice,mxCompatibility);args.add(args.size()-1,"--kline-vlinker-token");args.add(args.size()-1,vlinkerBridge.token());}
-                else{mxBridge=new com.opensaab.usb.MxNativeBridge(this,mxDevice,mxCompatibility);args.add(args.size()-1,"--candi-obdlink-token");args.add(args.size()-1,mxBridge.token());
-                    args.add(args.size()-1,"--harness-target");args.add(args.size()-1,"native-manual");}
+                // vLinker: one adapter for both paths of a 2006 9-5 Tech 2 session, K-line on pin 7
+                // (DICE identification) and HS-CAN on pins 6/14 (CANdi, engine); the emulator
+                // switches it per request.
+                if(liveVlinker){vlinkerBridge=new com.opensaab.usb.VlinkerNativeBridge(this,mxDevice,mxCompatibility);args.add(args.size()-1,"--candi-vlinker-token");args.add(args.size()-1,vlinkerBridge.token());}
+                else{mxBridge=new com.opensaab.usb.MxNativeBridge(this,mxDevice,mxCompatibility);args.add(args.size()-1,"--candi-obdlink-token");args.add(args.size()-1,mxBridge.token());}
+                args.add(args.size()-1,"--harness-target");args.add(args.size()-1,"native-manual");
             }
             ProcessBuilder builder=new ProcessBuilder(args).directory(session).redirectErrorStream(true);
             com.opensaab.usb.DemandStartup.configure(this,builder);
